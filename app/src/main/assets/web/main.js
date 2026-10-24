@@ -4,6 +4,8 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
+import { polygonizeSdf } from './lib/sdf.js';
+import { SDF } from './characters.js';
 
 const $ = (s) => document.querySelector(s);
 const D2R = Math.PI / 180;
@@ -76,7 +78,8 @@ const RIG = [
 const LIMBS = [['shoulderL', 'elbowL', 'wristL', 'arm'], ['shoulderR', 'elbowR', 'wristR', 'arm'],
   ['hipL', 'kneeL', 'ankleL', 'leg'], ['hipR', 'kneeR', 'ankleR', 'leg']];
 const STYLES = {
-  poseme: { label: 'Poseme (sheet)', color: '#efe9df', head: 0.24, headShape: 'sphere', face: true, torso: 'smooth', w: 1, arm: 0.05, leg: 0.068, hand: 'glove', foot: 'boot', armK: 1, legK: 1, torsoK: 1 },
+  poseme: { label: 'Poseme (sheet)', color: '#efe9df', head: 0.24, headShape: 'sphere', face: true, torso: 'sdf', sdf: 'poseme', w: 1, hipW: 1.17, arm: 0.062, leg: 0.075, hand: 'sdf', foot: 'ellipsoid', footR: [0.078, 0.06, 0.12], footOff: [0, -0.02, 0.045], armK: 1, legK: 1, torsoK: 1 },
+  blob: { label: 'Blob Buddy', color: '#fbfbfd', head: 0.3, headShape: 'ellipsoid', headR: [0.37, 0.27, 0.3], headY: 0.257, face: true, faceKind: 'blob', torso: 'sdf', sdf: 'blob', noNeck: true, noShoulderBall: true, w: 1, hipW: 1.45, arm: 0.062, leg: 0.074, hand: 'none', foot: 'ellipsoid', footR: [0.092, 0.052, 0.115], footOff: [0, -0.025, 0.03], armK: 0.63, legK: 0.39, torsoK: 0.6 },
   female: { label: 'Poseme Girl', color: '#f2e4d6', head: 0.235, headShape: 'sphere', face: true, lashes: true, hair: true, torso: 'smooth', w: 0.88, hipW: 1.15, arm: 0.042, leg: 0.058, hand: 'glove', foot: 'boot', armK: 0.95, legK: 1.03, torsoK: 0.95 },
   chibi: { label: 'Chibi', color: '#efe9df', head: 0.33, headShape: 'sphere', face: true, torso: 'smooth', w: 0.9, arm: 0.045, leg: 0.06, hand: 'glove', foot: 'boot', armK: 0.62, legK: 0.55, torsoK: 0.7 },
   mannequin: { label: 'Mannequin', color: '#d8b48a', joint: '#a07a50', head: 0.15, headShape: 'egg', face: false, torso: 'smooth', w: 1, arm: 0.04, leg: 0.055, hand: 'mitten', foot: 'shoe', armK: 1.1, legK: 1.12, torsoK: 1.05, balls: true },
@@ -94,7 +97,27 @@ function makeDot(side, size) {
   return d;
 }
 
-const EXPRESSIONS = ['smile', 'neutral', 'surprised', 'sad', 'angry', 'wink', 'laugh'];
+// Blob Buddy face from its sheet: dot eyes, wavy smile with cheek curls, open-mouth phonemes
+function drawBlobFace(c, ctx, line) {
+  const cx = 128, ey = 124, my = 138, e = c.expr;
+  const dot = (x) => { ctx.beginPath(); ctx.ellipse(x, ey, 5, 6, 0, 0, 7); ctx.fill(); };
+  dot(cx - 32); if (e !== 'wink') dot(cx + 32); else line(cx + 26, ey, cx + 38, ey);
+  const open = (w, h, tongue = true) => {
+    ctx.beginPath(); ctx.ellipse(cx, my + 2, w, h, 0, 0, Math.PI); ctx.closePath(); ctx.fill();
+    if (tongue) { ctx.fillStyle = '#e0564b'; ctx.beginPath(); ctx.ellipse(cx, my + h * 0.55, w * 0.6, h * 0.35, 0, 0, 7); ctx.fill(); ctx.fillStyle = '#1c1c1c'; }
+  };
+  if (e === 'smile' || e === 'wink') {
+    ctx.beginPath(); ctx.moveTo(cx - 20, my); ctx.quadraticCurveTo(cx - 10, my + 10, cx, my + 4); ctx.quadraticCurveTo(cx + 10, my + 10, cx + 20, my); ctx.stroke();
+    line(cx - 20, my, cx - 25, my - 6); line(cx + 20, my, cx + 25, my - 6);
+  } else if (e === 'neutral') line(cx - 14, my + 2, cx + 14, my + 2);
+  else if (e === 'laugh') open(22, 18);
+  else if (e === 'surprised') { ctx.beginPath(); ctx.ellipse(cx, my + 6, 8, 10, 0, 0, 7); ctx.fill(); }
+  else if (e === 'sad') { ctx.beginPath(); ctx.arc(cx, my + 14, 13, Math.PI * 1.2, Math.PI * 1.8); ctx.stroke(); }
+  else if (e === 'angry') { line(cx - 42, ey - 14, cx - 24, ey - 8); line(cx + 24, ey - 8, cx + 42, ey - 14); line(cx - 12, my + 4, cx + 12, my + 4); }
+  else open(16, 13);
+}
+
+const EXPRESSIONS = ['smile', 'neutral', 'surprised', 'sad', 'angry', 'wink', 'laugh', 'grin'];
 function drawFace(c) {
   if (!c.faceCanvas) return;
   const ctx = c.faceCanvas.getContext('2d'), W = 512, H = 256, cx = 128, ey = 112, my = 150;
@@ -107,13 +130,14 @@ function drawFace(c) {
     if (c.style.lashes) { const d = Math.sign(x - cx); line(x + d * 3, ey - 9, x + d * 9, ey - 15); line(x + d * 6, ey - 5, x + d * 12, ey - 9); }
   };
   const e = c.expr;
+  if (c.style.faceKind === 'blob') return drawBlobFace(c, ctx, line), (c.faceTex.needsUpdate = true);
   if (e === 'neutral') { line(cx - 30, ey - 2, cx - 12, ey - 2); line(cx + 12, ey - 2, cx + 30, ey - 2); line(cx - 30, ey + 4, cx - 12, ey + 4); line(cx + 12, ey + 4, cx + 30, ey + 4); line(cx - 18, my, cx + 18, my); }
   else {
     eye(cx - 20, true); eye(cx + 20, e !== 'wink');
     if (e === 'surprised') { ctx.beginPath(); ctx.arc(cx - 20, ey - 14, 8, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke(); ctx.beginPath(); ctx.arc(cx + 20, ey - 14, 8, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke(); ctx.beginPath(); ctx.ellipse(cx, my + 4, 7, 11, 0, 0, 7); ctx.stroke(); }
     if (e === 'sad') { line(cx - 30, ey - 12, cx - 14, ey - 17); line(cx + 14, ey - 17, cx + 30, ey - 12); ctx.beginPath(); ctx.arc(cx, my + 14, 16, Math.PI * 1.2, Math.PI * 1.8); ctx.stroke(); }
     if (e === 'angry') { line(cx - 30, ey - 18, cx - 12, ey - 10); line(cx + 12, ey - 10, cx + 30, ey - 18); line(cx - 14, my + 2, cx + 14, my + 2); }
-    if (e === 'smile' || e === 'wink' || e === 'laugh') {
+    if (e === 'smile' || e === 'wink' || e === 'laugh' || e === 'grin') {
       const r = e === 'laugh' ? 20 : 15;
       ctx.beginPath(); ctx.moveTo(cx - r, my - 4); ctx.arc(cx, my - 4, r, 0, Math.PI); ctx.closePath(); ctx.fill();
       ctx.fillStyle = '#e89a9a'; ctx.beginPath(); ctx.ellipse(cx, my + r - 8, r * 0.5, 4, 0, 0, 7); ctx.fill();
@@ -121,6 +145,9 @@ function drawFace(c) {
   }
   c.faceTex.needsUpdate = true;
 }
+
+const sdfCache = {};
+const sdfGeo = (key, desc) => (sdfCache[key] ??= polygonizeSdf(desc));
 
 const lathe = (pts, sx = 1, sy = 1) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r * sx, y * sy)), 28);
 
@@ -158,7 +185,12 @@ function buildRig(type) {
   }
   const J = c.joints, tk = st.torsoK, w = st.w, hw = w * (st.hipW || 1);
   // torso
-  if (st.torso === 'smooth') {
+  if (st.torso === 'sdf') {
+    // torso shapes come from the img2threejs sculpt spec, split in two so the spine can bend
+    const g = SDF[st.sdf], spineY = c.hipsY + 0.14 * tk;
+    mesh(sdfGeo(st.sdf + '-lower', g.lower), J.hips, [0, -c.hipsY, 0], null, c.mat, true);
+    mesh(sdfGeo(st.sdf + '-upper', g.upper), J.spine, [0, -spineY, 0], null, c.mat, true);
+  } else if (st.torso === 'smooth') {
     mesh(lathe([[0, -0.11], [0.08, -0.105], [0.125, -0.06], [0.13, 0.0], [0.115, 0.07], [0.1, 0.1], [0, 0.1]], hw, tk), J.hips, [0, 0, 0], [1, 1, 0.78], c.mat, true);
     mesh(lathe([[0, -0.06], [0.112, -0.06], [0.095, 0.07], [0.105, 0.16], [0.11, 0.21], [0, 0.21]], w * (st.hipW ? 0.9 : 1), tk), J.spine, [0, 0, 0], [1, 1, 0.78], c.mat, true);
     mesh(lathe([[0, -0.07], [0.1, -0.07], [0.135, 0.06], [0.14, 0.14], [0.115, 0.21], [0.06, 0.245], [0, 0.25]], w, tk), J.chest, [0, 0, 0], [1, 1, 0.74], c.mat, true);
@@ -173,11 +205,11 @@ function buildRig(type) {
     mesh(new THREE.BoxGeometry(0.3 * w, 0.22 * tk, 0.16), J.chest, [0, 0.11 * tk, 0], null, c.mat, true);
   }
   const nr = st.torso === 'stick' ? 0.02 : 0.045 * w;
-  mesh(new THREE.CylinderGeometry(nr, nr * 1.1, 0.12, 12), J.neck, [0, 0.03, 0], null, c.mat, true);
+  if (!st.noNeck && st.torso !== 'sdf') mesh(new THREE.CylinderGeometry(nr, nr * 1.1, 0.12, 12), J.neck, [0, 0.03, 0], null, c.mat, true);
   // head
   const hr = st.head;
-  const headGeo = st.headShape === 'box' ? new THREE.BoxGeometry(hr * 1.7, hr * 1.7, hr * 1.7) : new THREE.SphereGeometry(hr, 48, 32);
-  const head = mesh(headGeo, J.head, [0, hr * 0.9, 0], st.headShape === 'egg' ? [0.82, 1.12, 0.9] : null, c.headMat || c.mat, true);
+  const headGeo = st.headShape === 'box' ? new THREE.BoxGeometry(hr * 1.7, hr * 1.7, hr * 1.7) : st.headShape === 'ellipsoid' ? new THREE.SphereGeometry(1, 56, 32) : new THREE.SphereGeometry(hr, 48, 32);
+  const head = mesh(headGeo, J.head, [0, st.headY ?? hr * 0.9, 0], st.headShape === 'egg' ? [0.82, 1.12, 0.9] : st.headR || null, c.headMat || c.mat, true);
   if (st.hair) {
     const hairMat = new THREE.MeshStandardMaterial({ color: '#4a3326', roughness: 0.7 });
     mesh(new THREE.SphereGeometry(0.095, 20, 14), J.head, [0, hr * 1.55, -hr * 0.55], null, hairMat, true);
@@ -187,11 +219,15 @@ function buildRig(type) {
   for (const s of [1, -1]) {
     const S = s === 1 ? 'L' : 'R';
     const ball = (j, r) => { const b = mesh(new THREE.SphereGeometry(r, 16, 12), J[j + S], [0, 0, 0], null, c.jointMat); c.balls.push(b); return b; };
-    ball('shoulder', Math.max(st.arm * 1.15, 0.03));
+    if (!st.noShoulderBall) ball('shoulder', Math.max(st.arm * 1.15, 0.03));
     c.elbowBalls = (c.elbowBalls || []).concat(ball('elbow', st.arm * (st.balls ? 1.35 : 1)), ball('knee', st.leg * (st.balls ? 1.35 : 1)));
     if (st.balls) { ball('wrist', st.arm * 1.2); ball('ankle', st.leg * 1.2); ball('hip', st.leg * 1.3); }
     const hand = J['wrist' + S];
-    if (st.hand === 'glove' || st.hand === 'mitten') {
+    if (st.hand === 'sdf') {
+      const hm = mesh(sdfGeo(st.sdf + '-hand' + S, SDF[st.sdf][s === 1 ? 'hand' : 'handR']), hand, [0, 0, 0], null);
+      hm.rotation.z = s * Math.PI / 2; hm.scale.setScalar(SDF[st.sdf].handScale); // spec hand hangs along -Y; rig arm runs along ±X
+    } else if (st.hand === 'none') mesh(new THREE.SphereGeometry(st.arm, 18, 12), hand, [0, 0, 0], null);
+    else if (st.hand === 'glove' || st.hand === 'mitten') {
       // cartoon glove: cuff + palm + 3 fingers + thumb (fingers curl for hand poses)
       const fr = st.hand === 'glove' ? 0.03 : 0.019, pk = st.hand === 'glove' ? 1.25 : 0.8;
       if (st.hand === 'glove') mesh(new THREE.CylinderGeometry(0.068, 0.056, 0.07, 16), hand, [s * 0.03, 0, 0], null).rotation.z = Math.PI / 2;
@@ -207,7 +243,8 @@ function buildRig(type) {
     } else if (st.hand === 'ball') mesh(new THREE.SphereGeometry(0.04, 14, 10), hand, [s * 0.04, 0, 0], null);
     else mesh(new THREE.BoxGeometry(0.08, 0.03, 0.065), hand, [s * 0.05, 0, 0], null);
     const foot = J['ankle' + S];
-    if (st.foot === 'boot') {
+    if (st.foot === 'ellipsoid') mesh(new THREE.SphereGeometry(1, 24, 16), foot, st.footOff, st.footR);
+    else if (st.foot === 'boot') {
       mesh(new THREE.CylinderGeometry(0.082, 0.075, 0.1, 18), foot, [0, 0.035, 0], null);
       mesh(new THREE.SphereGeometry(0.088, 20, 14), foot, [0, -0.025, 0.06], [1, 0.62, 1.6]);
     } else if (st.foot === 'shoe') mesh(new THREE.SphereGeometry(0.06, 16, 12), foot, [0, -0.03, 0.04], [1, 0.6, 1.8]);
@@ -631,7 +668,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // test hook for automated checks
-window.poseme = { chars, props, addCharacter, applyPreset, mirror, select, sceneState, loadScene, undo, applyStretch, setHand, drawFace, renderPanel };
+window.poseme = { chars, props, addCharacter, applyPreset, mirror, select, sceneState, loadScene, undo, applyStretch, setHand, drawFace, renderPanel, scene, camera, orbit, THREE };
 
 await addCharacter('poseme');
 $('#loading').remove();
