@@ -1,0 +1,64 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Poseme 3D</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none}
+html,body{margin:0;height:100%;overflow:hidden;background:#8a8a8a;font:14px system-ui,sans-serif;color:#fff}
+canvas{display:block;touch-action:none}
+.bar{position:fixed;display:flex;gap:4px;z-index:5}
+.bar button,.panel button{background:rgba(30,30,30,.72);color:#fff;border:0;border-radius:10px;min-width:44px;height:44px;font-size:18px;padding:0 8px}
+.bar button.on,.panel button.on{background:#e8a33a;color:#222}
+#left{left:6px;top:6px;flex-direction:column}
+#top{right:6px;top:6px}
+#undo{left:6px;bottom:62px}
+#sel{left:0;right:0;bottom:6px;justify-content:center;flex-wrap:wrap;padding:0 6px;display:none}
+#sel button{font-size:16px;min-width:40px;height:40px}
+.panel{position:fixed;left:8px;right:8px;bottom:56px;max-height:46vh;overflow:auto;background:rgba(25,25,25,.9);border-radius:14px;padding:10px;z-index:6;display:none}
+.panel h3{margin:2px 0 8px;font-size:15px;display:flex;justify-content:space-between}
+.panel .row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;align-items:center}
+.panel button{font-size:14px;height:38px}
+.panel label{display:flex;align-items:center;gap:8px;width:100%;margin:4px 0}
+.panel input[type=range]{flex:1}
+.panel input[type=color]{width:44px;height:36px;border:0;background:none}
+.sw{width:34px!important;min-width:34px!important;height:34px!important;border-radius:50%!important}
+#toast{position:fixed;left:50%;top:60px;transform:translateX(-50%);background:rgba(0,0,0,.8);padding:8px 14px;border-radius:20px;display:none;z-index:9}
+#loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-size:18px;z-index:10;background:#8a8a8a}
+</style>
+<script type="importmap">{"imports":{"three":"./lib/three.module.min.js","three/addons/":"./lib/addons/"}}</script>
+</head><body>
+<div id="loading">Loading Poseme 3D…</div>
+<div id="left" class="bar">
+  <button data-panel="add" title="Add character / prop">🧍</button>
+  <button data-panel="poses" title="Poses">🤸</button>
+  <button data-panel="bg" title="Background">🖼️</button>
+  <button data-panel="light" title="Light">💡</button>
+  <button data-act="shot" title="Screenshot">📷</button>
+</div>
+<div id="top" class="bar">
+  <button data-act="save" title="Quick save scene">💾</button>
+  <button data-panel="camera" title="Camera settings">⚙️</button>
+</div>
+<div id="undo" class="bar">
+  <button data-act="undo" title="Undo">↶</button>
+  <button data-act="redo" title="Redo">↷</button>
+</div>
+<div id="sel" class="bar">
+  <button data-act="mode" id="modeBtn" title="Move / rotate / scale">✥</button>
+  <button data-act="mirror" title="Mirror pose">⇄</button>
+  <button data-act="reset" title="Reset pose">⟲</button>
+  <button data-panel="squash" title="Squash, stretch &amp; rubber hose">🌀</button>
+  <button data-panel="face" title="Expressions">😊</button>
+  <button data-panel="hands" title="Hand poses">✋</button>
+  <button data-act="dup" title="Duplicate">⧉</button>
+  <button data-panel="color" title="Color">🎨</button>
+  <button data-act="dots" title="Show / hide joints">👁</button>
+  <button data-act="lock" title="Lock">🔓</button>
+  <button data-act="del" title="Delete">🗑</button>
+</div>
+<div id="panel" class="panel"></div>
+<div id="toast"></div>
+<input type="file" id="file" accept="image/*,.json,application/json" hidden>
+<script type="module" src="./main.js"></script>
+</body></html>
