@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
 
 const $ = (s) => document.querySelector(s);
 const D2R = Math.PI / 180;
@@ -15,6 +16,8 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.prepend(renderer.domElement);
 
+const effect = new OutlineEffect(renderer, { defaultThickness: 0.014, defaultColor: [0.08, 0.08, 0.08] });
+let outlines = true;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8a8a8a);
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.05, 200);
@@ -48,6 +51,8 @@ updateLight();
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 1 }));
 floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
+floor.material.userData.outlineParameters = { visible: false };
+arrows.traverse((o) => o.material && (o.material.userData.outlineParameters = { visible: false }));
 const grid = new THREE.GridHelper(60, 120, 0x555555, 0x7a7a7a);
 grid.position.y = 0.001;
 scene.add(floor, grid);
@@ -58,18 +63,26 @@ tc.setSpace('local');
 scene.add(tc.getHelper());
 tc.addEventListener('dragging-changed', (e) => { orbit.enabled = !e.value; if (e.value) pushUndo(); });
 
-// ---------- Poseme character (from the model sheet) ----------
-// [name, parent, offset, side(+1 L, -1 R, 0 center)]
+// ---------- Rig characters (Poseme from the model sheet + variants on the same rig) ----------
+// [name, parent, offset, side(+1 L, -1 R, 0 center), group for proportion scaling]
 const RIG = [
-  ['hips', null, [0, 0.95, 0], 0], ['spine', 'hips', [0, 0.14, 0], 0], ['chest', 'spine', [0, 0.18, 0], 0],
-  ['neck', 'chest', [0, 0.2, 0], 0], ['head', 'neck', [0, 0.07, 0], 0],
-  ['shoulderL', 'chest', [0.12, 0.15, 0], 1], ['elbowL', 'shoulderL', [0.27, 0, 0], 1], ['wristL', 'elbowL', [0.25, 0, 0], 1],
-  ['shoulderR', 'chest', [-0.12, 0.15, 0], -1], ['elbowR', 'shoulderR', [-0.27, 0, 0], -1], ['wristR', 'elbowR', [-0.25, 0, 0], -1],
-  ['hipL', 'hips', [0.09, -0.04, 0], 1], ['kneeL', 'hipL', [0, -0.42, 0], 1], ['ankleL', 'kneeL', [0, -0.41, 0], 1],
-  ['hipR', 'hips', [-0.09, -0.04, 0], -1], ['kneeR', 'hipR', [0, -0.42, 0], -1], ['ankleR', 'kneeR', [0, -0.41, 0], -1],
+  ['hips', null, [0, 0, 0], 0, 't'], ['spine', 'hips', [0, 0.14, 0], 0, 't'], ['chest', 'spine', [0, 0.18, 0], 0, 't'],
+  ['neck', 'chest', [0, 0.2, 0], 0, 't'], ['head', 'neck', [0, 0.07, 0], 0, 't'],
+  ['shoulderL', 'chest', [0.12, 0.15, 0], 1, 's'], ['elbowL', 'shoulderL', [0.27, 0, 0], 1, 'a'], ['wristL', 'elbowL', [0.25, 0, 0], 1, 'a'],
+  ['shoulderR', 'chest', [-0.12, 0.15, 0], -1, 's'], ['elbowR', 'shoulderR', [-0.27, 0, 0], -1, 'a'], ['wristR', 'elbowR', [-0.25, 0, 0], -1, 'a'],
+  ['hipL', 'hips', [0.09, -0.04, 0], 1, 'h'], ['kneeL', 'hipL', [0, -0.42, 0], 1, 'l'], ['ankleL', 'kneeL', [0, -0.41, 0], 1, 'l'],
+  ['hipR', 'hips', [-0.09, -0.04, 0], -1, 'h'], ['kneeR', 'hipR', [0, -0.42, 0], -1, 'l'], ['ankleR', 'kneeR', [0, -0.41, 0], -1, 'l'],
 ];
-const LIMBS = [['shoulderL', 'elbowL', 'wristL', 0.05], ['shoulderR', 'elbowR', 'wristR', 0.05],
-  ['hipL', 'kneeL', 'ankleL', 0.068], ['hipR', 'kneeR', 'ankleR', 0.068]];
+const LIMBS = [['shoulderL', 'elbowL', 'wristL', 'arm'], ['shoulderR', 'elbowR', 'wristR', 'arm'],
+  ['hipL', 'kneeL', 'ankleL', 'leg'], ['hipR', 'kneeR', 'ankleR', 'leg']];
+const STYLES = {
+  poseme: { label: 'Poseme (sheet)', color: '#efe9df', head: 0.24, headShape: 'sphere', face: true, torso: 'smooth', w: 1, arm: 0.05, leg: 0.068, hand: 'glove', foot: 'boot', armK: 1, legK: 1, torsoK: 1 },
+  female: { label: 'Poseme Girl', color: '#f2e4d6', head: 0.235, headShape: 'sphere', face: true, lashes: true, hair: true, torso: 'smooth', w: 0.88, hipW: 1.15, arm: 0.042, leg: 0.058, hand: 'glove', foot: 'boot', armK: 0.95, legK: 1.03, torsoK: 0.95 },
+  chibi: { label: 'Chibi', color: '#efe9df', head: 0.33, headShape: 'sphere', face: true, torso: 'smooth', w: 0.9, arm: 0.045, leg: 0.06, hand: 'glove', foot: 'boot', armK: 0.62, legK: 0.55, torsoK: 0.7 },
+  mannequin: { label: 'Mannequin', color: '#d8b48a', joint: '#a07a50', head: 0.15, headShape: 'egg', face: false, torso: 'smooth', w: 1, arm: 0.04, leg: 0.055, hand: 'mitten', foot: 'shoe', armK: 1.1, legK: 1.12, torsoK: 1.05, balls: true },
+  stickbot: { label: 'Stick Bot', color: '#e6e6e6', joint: '#8f8f8f', head: 0.13, headShape: 'sphere', face: false, torso: 'stick', w: 1, arm: 0.022, leg: 0.026, hand: 'ball', foot: 'shoe', armK: 1.05, legK: 1.1, torsoK: 1, balls: true },
+  squarebot: { label: 'Square Stick Bot', color: '#e0e0e0', joint: '#8a8a8a', head: 0.13, headShape: 'box', face: false, torso: 'box', w: 1, arm: 0.03, leg: 0.036, hand: 'box', foot: 'box', armK: 1, legK: 1.05, torsoK: 1, balls: true, square: true },
+};
 const DOT_COLOR = { 1: 0xe04444, '-1': 0x4466dd, 0: 0x33cc55 };
 const dotGeo = new THREE.SphereGeometry(1, 12, 8);
 
@@ -83,11 +96,16 @@ function makeDot(side, size) {
 
 const EXPRESSIONS = ['smile', 'neutral', 'surprised', 'sad', 'angry', 'wink', 'laugh'];
 function drawFace(c) {
+  if (!c.faceCanvas) return;
   const ctx = c.faceCanvas.getContext('2d'), W = 512, H = 256, cx = 128, ey = 112, my = 150;
   ctx.fillStyle = c.color; ctx.fillRect(0, 0, W, H);
   ctx.strokeStyle = ctx.fillStyle = '#2b2b2b'; ctx.lineWidth = 4; ctx.lineCap = 'round';
-  const eye = (x, open = true) => { ctx.beginPath(); if (open) { ctx.ellipse(x, ey, 5, 10, 0, 0, 7); ctx.stroke(); } else { ctx.moveTo(x - 9, ey); ctx.lineTo(x + 9, ey); ctx.stroke(); } };
   const line = (x1, y1, x2, y2) => { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); };
+  const eye = (x, open = true) => {
+    ctx.beginPath();
+    if (open) { ctx.ellipse(x, ey, 5, 10, 0, 0, 7); ctx.stroke(); } else { ctx.moveTo(x - 9, ey); ctx.lineTo(x + 9, ey); ctx.stroke(); }
+    if (c.style.lashes) { const d = Math.sign(x - cx); line(x + d * 3, ey - 9, x + d * 9, ey - 15); line(x + d * 6, ey - 5, x + d * 12, ey - 9); }
+  };
   const e = c.expr;
   if (e === 'neutral') { line(cx - 30, ey - 2, cx - 12, ey - 2); line(cx + 12, ey - 2, cx + 30, ey - 2); line(cx - 30, ey + 4, cx - 12, ey + 4); line(cx + 12, ey + 4, cx + 30, ey + 4); line(cx - 18, my, cx + 18, my); }
   else {
@@ -104,14 +122,22 @@ function drawFace(c) {
   c.faceTex.needsUpdate = true;
 }
 
-function buildPoseme() {
-  const c = { type: 'poseme', group: new THREE.Group(), joints: {}, dots: [], color: '#efe9df', expr: 'smile', hand: 'relaxed',
-    squash: 1, hose: false, bend: 1, tubes: [], fingers: { 1: [], '-1': [] } };
+const lathe = (pts, sx = 1, sy = 1) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r * sx, y * sy)), 28);
+
+function buildRig(type) {
+  const st = STYLES[type];
+  const c = { type, rig: true, style: st, group: new THREE.Group(), joints: {}, dots: [], color: st.color, expr: 'smile', hand: 'relaxed',
+    squash: 1, hose: false, bend: 1, tubes: [], balls: [], fingers: { 1: [], '-1': [] } };
   c.mat = new THREE.MeshStandardMaterial({ color: c.color, roughness: 0.55 });
-  c.faceCanvas = Object.assign(document.createElement('canvas'), { width: 512, height: 256 });
-  c.faceTex = new THREE.CanvasTexture(c.faceCanvas);
-  c.faceTex.colorSpace = THREE.SRGBColorSpace;
-  c.headMat = new THREE.MeshStandardMaterial({ map: c.faceTex, roughness: 0.55 });
+  c.jointMat = st.joint ? new THREE.MeshStandardMaterial({ color: st.joint, roughness: 0.5 }) : c.mat;
+  if (st.face) {
+    c.faceCanvas = Object.assign(document.createElement('canvas'), { width: 512, height: 256 });
+    c.faceTex = new THREE.CanvasTexture(c.faceCanvas);
+    c.faceTex.colorSpace = THREE.SRGBColorSpace;
+    c.headMat = new THREE.MeshStandardMaterial({ map: c.faceTex, roughness: 0.55 });
+  }
+  const K = { t: [1, st.torsoK, 1], s: [st.w, st.torsoK, 1], a: [st.armK, 1, 1], h: [st.w * (st.hipW || 1), st.legK, 1], l: [1, st.legK, 1] };
+  c.hipsY = 0.08 + 0.87 * st.legK;
   const mesh = (geo, parent, pos, scale, mat = c.mat, stretchy = false) => {
     const m = new THREE.Mesh(geo, mat);
     m.position.set(...pos); if (scale) m.scale.set(...scale);
@@ -119,9 +145,10 @@ function buildPoseme() {
     if (stretchy) { m.userData.basePos = m.position.clone(); m.userData.baseScale = m.scale.clone(); parent.userData.stretchy.push(m); }
     parent.add(m); return m;
   };
-  for (const [name, parent, off, side] of RIG) {
+  for (const [name, parent, off, side, g] of RIG) {
     const j = new THREE.Object3D();
-    j.name = name; j.position.set(...off);
+    j.name = name; j.position.set(...off).multiply(new THREE.Vector3(...K[g]));
+    if (name === 'hips') j.position.y = c.hipsY;
     j.userData = { base: j.position.clone(), stretch: 1, side, stretchy: [] };
     (parent ? c.joints[parent] : c.group).add(j);
     c.joints[name] = j;
@@ -129,34 +156,62 @@ function buildPoseme() {
     dot.userData.joint = j; dot.userData.char = c;
     j.add(dot); c.dots.push(dot);
   }
-  const J = c.joints;
-  mesh(new THREE.CapsuleGeometry(0.13, 0.06, 6, 16), J.hips, [0, 0.0, 0], [1, 1, 0.8], c.mat, true);
-  mesh(new THREE.CapsuleGeometry(0.105, 0.1, 6, 16), J.spine, [0, 0.07, 0], [1, 1, 0.8], c.mat, true);
-  mesh(new THREE.CapsuleGeometry(0.14, 0.1, 6, 16), J.chest, [0, 0.09, 0], [1, 1, 0.72], c.mat, true);
-  mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.1, 12), J.neck, [0, 0.03, 0], null, c.mat, true);
-  mesh(new THREE.SphereGeometry(0.24, 40, 24), J.head, [0, 0.22, 0], null, c.headMat, true);
+  const J = c.joints, tk = st.torsoK, w = st.w, hw = w * (st.hipW || 1);
+  // torso
+  if (st.torso === 'smooth') {
+    mesh(lathe([[0, -0.11], [0.08, -0.105], [0.125, -0.06], [0.13, 0.0], [0.115, 0.07], [0.1, 0.1], [0, 0.1]], hw, tk), J.hips, [0, 0, 0], [1, 1, 0.78], c.mat, true);
+    mesh(lathe([[0, -0.06], [0.112, -0.06], [0.095, 0.07], [0.105, 0.16], [0.11, 0.21], [0, 0.21]], w * (st.hipW ? 0.9 : 1), tk), J.spine, [0, 0, 0], [1, 1, 0.78], c.mat, true);
+    mesh(lathe([[0, -0.07], [0.1, -0.07], [0.135, 0.06], [0.14, 0.14], [0.115, 0.21], [0.06, 0.245], [0, 0.25]], w, tk), J.chest, [0, 0, 0], [1, 1, 0.74], c.mat, true);
+  } else if (st.torso === 'stick') {
+    const bar = (parent, len, r, horiz) => { const m = mesh(new THREE.CylinderGeometry(r, r, len, 10), parent, horiz ? [0, horiz, 0] : [0, len / 2, 0], null, c.mat, !horiz); if (horiz) m.rotation.z = Math.PI / 2; };
+    bar(J.hips, 0.14 * tk, 0.025); bar(J.spine, 0.18 * tk, 0.025); bar(J.chest, 0.2 * tk, 0.025);
+    bar(J.chest, 0.24 * w, 0.02, 0.15 * tk); bar(J.hips, 0.18 * hw, 0.02, -0.04 * st.legK);
+    mesh(new THREE.SphereGeometry(0.045, 14, 10), J.hips, [0, 0, 0], null, c.jointMat);
+  } else {
+    mesh(new THREE.BoxGeometry(0.24 * hw, 0.13 * tk, 0.14), J.hips, [0, 0, 0], null, c.mat, true);
+    mesh(new THREE.BoxGeometry(0.18 * w, 0.16 * tk, 0.12), J.spine, [0, 0.09 * tk, 0], null, c.mat, true);
+    mesh(new THREE.BoxGeometry(0.3 * w, 0.22 * tk, 0.16), J.chest, [0, 0.11 * tk, 0], null, c.mat, true);
+  }
+  const nr = st.torso === 'stick' ? 0.02 : 0.045 * w;
+  mesh(new THREE.CylinderGeometry(nr, nr * 1.1, 0.12, 12), J.neck, [0, 0.03, 0], null, c.mat, true);
+  // head
+  const hr = st.head;
+  const headGeo = st.headShape === 'box' ? new THREE.BoxGeometry(hr * 1.7, hr * 1.7, hr * 1.7) : new THREE.SphereGeometry(hr, 48, 32);
+  const head = mesh(headGeo, J.head, [0, hr * 0.9, 0], st.headShape === 'egg' ? [0.82, 1.12, 0.9] : null, c.headMat || c.mat, true);
+  if (st.hair) {
+    const hairMat = new THREE.MeshStandardMaterial({ color: '#4a3326', roughness: 0.7 });
+    mesh(new THREE.SphereGeometry(0.095, 20, 14), J.head, [0, hr * 1.55, -hr * 0.55], null, hairMat, true);
+    mesh(new THREE.SphereGeometry(hr * 1.02, 40, 20, 0, Math.PI * 2, 0, Math.PI * 0.38), J.head, [0, hr * 0.9, -0.01], null, hairMat, true);
+  }
+  void head;
   for (const s of [1, -1]) {
     const S = s === 1 ? 'L' : 'R';
-    mesh(new THREE.SphereGeometry(0.055, 16, 12), J['shoulder' + S], [0, 0, 0]);
-    c.elbowBalls = (c.elbowBalls || []).concat(
-      mesh(new THREE.SphereGeometry(0.05, 14, 10), J['elbow' + S], [0, 0, 0]),
-      mesh(new THREE.SphereGeometry(0.068, 14, 10), J['knee' + S], [0, 0, 0]));
-    // cartoon glove hand: palm + 3 fingers + thumb (fingers curl for hand poses)
+    const ball = (j, r) => { const b = mesh(new THREE.SphereGeometry(r, 16, 12), J[j + S], [0, 0, 0], null, c.jointMat); c.balls.push(b); return b; };
+    ball('shoulder', Math.max(st.arm * 1.15, 0.03));
+    c.elbowBalls = (c.elbowBalls || []).concat(ball('elbow', st.arm * (st.balls ? 1.35 : 1)), ball('knee', st.leg * (st.balls ? 1.35 : 1)));
+    if (st.balls) { ball('wrist', st.arm * 1.2); ball('ankle', st.leg * 1.2); ball('hip', st.leg * 1.3); }
     const hand = J['wrist' + S];
-    mesh(new THREE.CylinderGeometry(0.05, 0.045, 0.05, 14), hand, [s * 0.02, 0, 0], null).rotation.z = Math.PI / 2;
-    mesh(new THREE.SphereGeometry(0.07, 16, 12), hand, [s * 0.09, 0, 0], [1.15, 0.7, 1.05]);
-    [-0.035, 0, 0.035].forEach((z) => {
-      const f = new THREE.Group(); f.position.set(s * 0.145, 0, z); hand.add(f);
-      mesh(new THREE.CapsuleGeometry(0.026, 0.05, 4, 8), f, [s * 0.035, 0, 0], null).rotation.z = Math.PI / 2;
-      c.fingers[s].push(f);
-    });
-    const th = new THREE.Group(); th.position.set(s * 0.08, 0, 0.055); th.userData.thumb = true; hand.add(th);
-    mesh(new THREE.CapsuleGeometry(0.026, 0.035, 4, 8), th, [s * 0.015, 0, 0.025], null).rotation.x = Math.PI / 2;
-    c.fingers[s].push(th);
-    // boot
+    if (st.hand === 'glove' || st.hand === 'mitten') {
+      // cartoon glove: cuff + palm + 3 fingers + thumb (fingers curl for hand poses)
+      const fr = st.hand === 'glove' ? 0.03 : 0.019, pk = st.hand === 'glove' ? 1.25 : 0.8;
+      if (st.hand === 'glove') mesh(new THREE.CylinderGeometry(0.068, 0.056, 0.07, 16), hand, [s * 0.03, 0, 0], null).rotation.z = Math.PI / 2;
+      mesh(new THREE.SphereGeometry(0.07 * pk, 18, 12), hand, [s * 0.09 * pk, 0, 0], [1.15, 0.7, 1.05]);
+      [-0.035, 0, 0.035].forEach((z) => {
+        const f = new THREE.Group(); f.position.set(s * 0.145 * pk, 0, z * pk); hand.add(f);
+        mesh(new THREE.CapsuleGeometry(fr, 0.05 * pk, 4, 10), f, [s * 0.035 * pk, 0, 0], null).rotation.z = Math.PI / 2;
+        c.fingers[s].push(f);
+      });
+      const th = new THREE.Group(); th.position.set(s * 0.08 * pk, 0, 0.055 * pk); th.userData.thumb = true; hand.add(th);
+      mesh(new THREE.CapsuleGeometry(fr, 0.035 * pk, 4, 10), th, [s * 0.015, 0, 0.025], null).rotation.x = Math.PI / 2;
+      c.fingers[s].push(th);
+    } else if (st.hand === 'ball') mesh(new THREE.SphereGeometry(0.04, 14, 10), hand, [s * 0.04, 0, 0], null);
+    else mesh(new THREE.BoxGeometry(0.08, 0.03, 0.065), hand, [s * 0.05, 0, 0], null);
     const foot = J['ankle' + S];
-    mesh(new THREE.CylinderGeometry(0.075, 0.07, 0.09, 16), foot, [0, 0.03, 0], null);
-    mesh(new THREE.SphereGeometry(0.085, 18, 12), foot, [0, -0.025, 0.06], [1, 0.62, 1.55]);
+    if (st.foot === 'boot') {
+      mesh(new THREE.CylinderGeometry(0.082, 0.075, 0.1, 18), foot, [0, 0.035, 0], null);
+      mesh(new THREE.SphereGeometry(0.088, 20, 14), foot, [0, -0.025, 0.06], [1, 0.62, 1.6]);
+    } else if (st.foot === 'shoe') mesh(new THREE.SphereGeometry(0.06, 16, 12), foot, [0, -0.03, 0.04], [1, 0.6, 1.8]);
+    else mesh(new THREE.BoxGeometry(0.08, 0.05, 0.17), foot, [0, -0.045, 0.04], null);
   }
   for (const l of LIMBS) {
     const t = new THREE.Mesh(new THREE.BufferGeometry(), c.mat);
@@ -170,7 +225,7 @@ function buildPoseme() {
 const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3();
 function updateTubes(c) {
   for (const t of c.tubes) {
-    const [ja, jb, jc, r] = t.userData.limb;
+    const [ja, jb, jc, part] = t.userData.limb, r = c.style[part];
     c.group.worldToLocal(c.joints[ja].getWorldPosition(_a));
     c.group.worldToLocal(c.joints[jb].getWorldPosition(_b));
     c.group.worldToLocal(c.joints[jc].getWorldPosition(_c));
@@ -187,13 +242,13 @@ function updateTubes(c) {
     }
     const thin = 1 / Math.sqrt(c.joints[ja].userData.stretch); // volume preservation
     t.geometry.dispose();
-    t.geometry = new THREE.TubeGeometry(curve, 48, r * thin, 12, false);
+    t.geometry = new THREE.TubeGeometry(curve, 48, r * thin, c.style.square ? 4 : 12, false);
   }
   for (const b of c.elbowBalls) b.visible = !c.hose;
 }
 
 function applyStretch(c) {
-  if (c.type === 'poseme') {
+  if (c.rig) {
     for (const j of Object.values(c.joints)) {
       const s = j.parent.userData?.stretch || 1;
       if (j.userData.base) j.position.copy(j.userData.base).multiplyScalar(s);
@@ -220,13 +275,19 @@ function setHand(c, pose) {
 }
 
 // ---------- GLTF characters from the three.js repo ----------
-const MODELS = { xbot: 'models/Xbot.glb', soldier: 'models/Soldier.glb', michelle: 'models/Michelle.glb' };
+const MODELS = {
+  xbot: ['X Bot', 'models/Xbot.glb'], soldier: ['Soldier', 'models/Soldier.glb'], michelle: ['Michelle', 'models/Michelle.glb'],
+  robot: ['Robot', 'models/RobotExpressive.glb'], cesium: ['Cesium Man', 'models/CesiumMan.glb'], figure: ['Rigged Figure', 'models/RiggedFigure.glb'],
+};
+const SKIP_BONE = /end|top|finger|thumb|index|middle|ring|pinky|toe|eye|jaw|palm\d|_nub|tongue/i;
+const boneSide = (n) => (/left/i.test(n) || /(^|[_.\s])L([_.\s\d]|$)/.test(n) || /[a-z]L$/.test(n) ? 1
+  : /right/i.test(n) || /(^|[_.\s])R([_.\s\d]|$)/.test(n) || /[a-z]R$/.test(n) ? -1 : 0);
 const gltfCache = {};
 const loader = new GLTFLoader();
 const MAJOR_BONE = /(Hips|Spine\d?|Neck|Head|Shoulder|Arm|ForeArm|Hand|UpLeg|Leg|Foot)$/;
 
 async function buildGltf(type) {
-  gltfCache[type] ??= loader.loadAsync(MODELS[type]);
+  gltfCache[type] ??= loader.loadAsync(MODELS[type][1]);
   const gltf = await gltfCache[type];
   const root = SkeletonUtils.clone(gltf.scene);
   const c = { type, group: new THREE.Group(), joints: {}, dots: [], color: '#ffffff', squash: 1, hose: false, bend: 1, tubes: [], hand: 'relaxed', expr: 'smile' };
@@ -237,25 +298,31 @@ async function buildGltf(type) {
       o.material = o.material.clone(); o.userData.baseColor = o.material.color.clone();
     }
   });
-  const box = new THREE.Box3().setFromObject(root);
-  root.scale.multiplyScalar(1.8 / (box.max.y - box.min.y));
+  // skinned bounds are only right once bone matrices are current; without this some models load huge
+  root.updateMatrixWorld(true);
+  root.traverse((o) => o.isSkinnedMesh && o.skeleton.update());
+  const box = new THREE.Box3().setFromObject(root, true);
+  const k = 1.75 / (box.max.y - box.min.y);
+  root.scale.multiplyScalar(k);
+  root.position.set(-(box.min.x + box.max.x) / 2 * k, -box.min.y * k, -(box.min.z + box.max.z) / 2 * k);
   root.updateMatrixWorld(true);
   const ws = new THREE.Vector3();
-  root.traverse((o) => {
-    if (!o.isBone || !MAJOR_BONE.test(o.name)) return;
+  const bones = []; root.traverse((o) => o.isBone && bones.push(o));
+  const major = bones.filter((o) => MAJOR_BONE.test(o.name));
+  const pick = major.length >= 8 ? major : bones.filter((o) => !SKIP_BONE.test(o.name) && o.children.some((ch) => ch.isBone));
+  for (const o of pick) {
     o.userData = { stretch: 1, base: null, rest: o.quaternion.clone() };
     c.joints[o.name] = o;
-    const side = /Left/.test(o.name) ? 1 : /Right/.test(o.name) ? -1 : 0;
-    const dot = makeDot(side, 0.03);
+    const dot = makeDot(boneSide(o.name), 0.03);
     o.getWorldScale(ws); dot.scale.divide(ws);
     dot.userData.joint = o; dot.userData.char = c;
     o.add(dot); c.dots.push(dot);
-  });
+  }
   return c;
 }
 
 function tint(c) {
-  if (c.type === 'poseme') { c.mat.color.set(c.color); drawFace(c); return; }
+  if (c.rig) { c.mat.color.set(c.color); drawFace(c); return; }
   const col = new THREE.Color(c.color);
   c.group.traverse((o) => { if (o.isMesh && o.userData.baseColor) o.material.color.copy(o.userData.baseColor).multiply(col); });
 }
@@ -266,7 +333,7 @@ let sel = null; // {char, joint} | {char} | {prop}
 let showDots = true;
 
 async function addCharacter(type, state) {
-  const c = type === 'poseme' ? buildPoseme() : await buildGltf(type);
+  const c = STYLES[type] ? buildRig(type) : await buildGltf(type);
   scene.add(c.group);
   chars.push(c);
   if (state) applyCharState(c, state);
@@ -295,14 +362,14 @@ function charState(c) {
   for (const [k, j] of Object.entries(c.joints)) joints[k] = [...j.quaternion.toArray(), j.userData.stretch];
   return { type: c.type, pos: c.group.position.toArray(), rot: c.group.quaternion.toArray(), squash: c.squash,
     hose: c.hose, bend: c.bend, color: c.color, expr: c.expr, hand: c.hand, locked: !!c.locked,
-    hipsPos: c.type === 'poseme' ? c.joints.hips.position.toArray() : null, joints };
+    hipsPos: c.rig ? c.joints.hips.position.toArray() : null, joints };
 }
 function applyCharState(c, s) {
   c.group.position.fromArray(s.pos); c.group.quaternion.fromArray(s.rot);
   Object.assign(c, { squash: s.squash, hose: s.hose, bend: s.bend ?? 1, color: s.color, expr: s.expr, locked: s.locked });
   for (const [k, v] of Object.entries(s.joints)) { const j = c.joints[k]; if (j) { j.quaternion.fromArray(v); j.userData.stretch = v[4] ?? 1; } }
-  if (s.hipsPos && c.type === 'poseme') c.joints.hips.userData.base.fromArray(s.hipsPos);
-  if (c.type === 'poseme') setHand(c, s.hand || 'relaxed');
+  if (s.hipsPos && c.rig) c.joints.hips.userData.base.fromArray(s.hipsPos);
+  if (c.rig) setHand(c, s.hand || 'relaxed');
   applyStretch(c); tint(c);
 }
 const sceneState = () => ({ chars: chars.map(charState), props: props.map((p) => ({ kind: p.userData.kind, pos: p.position.toArray(), rot: p.quaternion.toArray(), scale: p.scale.toArray(), color: '#' + p.material.color.getHexString() })) });
@@ -337,26 +404,26 @@ const PRESETS = {
   Sad: { spine: [15, 0, 0], neck: [20, 0, 0], head: [15, 0, 0], shoulderL: [10, 0, -80], shoulderR: [10, 0, 80] },
 };
 function applyPreset(c, name) {
-  if (c.type !== 'poseme') return toast('Presets are for the Poseme character');
+  if (!c.rig) return toast('Presets work on the Poseme-family characters');
   pushUndo();
   const p = PRESETS[name];
   for (const [k, j] of Object.entries(c.joints)) {
     const e = p[k] || [0, 0, 0];
     j.quaternion.setFromEuler(new THREE.Euler(e[0] * D2R, e[1] * D2R, e[2] * D2R));
   }
-  c.joints.hips.userData.base.set(0, 0.95 + (p._y || 0), 0);
+  c.joints.hips.userData.base.set(0, c.hipsY + (p._y || 0) * c.style.legK, 0);
   applyStretch(c);
   if (name === 'Sad') { c.expr = 'sad'; drawFace(c); }
 }
 function resetPose(c) {
   pushUndo();
   for (const j of Object.values(c.joints)) { j.quaternion.copy(j.userData.rest || new THREE.Quaternion()); j.userData.stretch = 1; }
-  if (c.type === 'poseme') c.joints.hips.userData.base.set(0, 0.95, 0);
+  if (c.rig) c.joints.hips.userData.base.set(0, c.hipsY, 0);
   c.squash = 1; applyStretch(c);
 }
 const swapSide = (n) => n.replace(/L$|R$|Left|Right/, (m) => ({ L: 'R', R: 'L', Left: 'Right', Right: 'Left' }[m]));
 function mirror(c) {
-  if (c.type !== 'poseme') return toast('Mirror works on the Poseme character');
+  if (!c.rig) return toast('Mirror works on the Poseme-family characters');
   pushUndo();
   const snap = Object.fromEntries(Object.entries(c.joints).map(([k, j]) => [k, [j.quaternion.clone(), j.userData.stretch]]));
   for (const [k, [q, s]] of Object.entries(snap)) {
@@ -436,7 +503,10 @@ const charOf = () => sel?.char || chars[0];
 
 const PANELS = {
   add: () => [
-    row(...[['Poseme (sheet)', 'poseme'], ['X Bot', 'xbot'], ['Soldier', 'soldier'], ['Michelle', 'michelle']].map(([l, t]) =>
+    'Poseme characters (all features)',
+    row(...Object.entries(STYLES).map(([t, st]) => btn(st.label, async () => { pushUndo(); select({ char: await addCharacter(t) }); }))),
+    'Open-source rigged models',
+    row(...Object.entries(MODELS).map(([t, [l]]) =>
       btn(l, async () => { pushUndo(); toast('Loading ' + l + '…'); select({ char: await addCharacter(t) }); }))),
     'Props', row(...Object.keys(PROP_GEOS).map((k) => btn(k, () => { pushUndo(); select({ prop: addProp(k) }); }))),
   ],
@@ -461,7 +531,8 @@ const PANELS = {
     slider('Height', 5, 90, 1, light.el, (v) => { light.el = v; updateLight(); }),
     slider('Intensity', 0, 5, 0.05, light.power, (v) => { light.power = v; updateLight(); }),
     row(btn('Shadows', () => { sun.castShadow = !sun.castShadow; renderPanel('light'); }, sun.castShadow),
-      btn('Arrows', () => { arrows.visible = !arrows.visible; renderPanel('light'); }, arrows.visible)),
+      btn('Arrows', () => { arrows.visible = !arrows.visible; renderPanel('light'); }, arrows.visible),
+      btn('Outlines', () => { outlines = !outlines; renderPanel('light'); }, outlines)),
   ],
   camera: () => [
     slider('Field of view', 15, 100, 1, camera.fov, (v) => { camera.fov = v; camera.updateProjectionMatrix(); }),
@@ -476,14 +547,14 @@ const PANELS = {
         : 'Tap a joint dot to stretch / squash that part',
       slider('Whole body squash ↕', 0.4, 1.8, 0.01, c.squash, (v) => { c.squash = v; applyStretch(c); }),
     ];
-    if (c.type === 'poseme') out.push(
+    if (c.rig) out.push(
       row(btn('Rubber hose limbs', () => { pushUndo(); c.hose = !c.hose; renderPanel('squash'); }, c.hose)),
       slider('Hose bend', 0, 2, 0.01, c.bend, (v) => { c.bend = v; }));
     out.push(row(btn('Reset squash & stretch', () => { pushUndo(); Object.values(c.joints).forEach((x) => (x.userData.stretch = 1)); c.squash = 1; applyStretch(c); renderPanel('squash'); })));
     return out;
   },
-  face: () => { const c = charOf(); return c?.type !== 'poseme' ? ['Expressions are for the Poseme character'] : [row(...EXPRESSIONS.map((e) => btn(e, () => { pushUndo(); c.expr = e; drawFace(c); renderPanel('face'); }, c.expr === e)))]; },
-  hands: () => { const c = charOf(); return c?.type !== 'poseme' ? ['Hand poses are for the Poseme character'] : [row(...['open', 'relaxed', 'fist', 'point', 'peace', 'thumbsup'].map((h) => btn(h, () => { pushUndo(); setHand(c, h); renderPanel('hands'); }, c.hand === h)))]; },
+  face: () => { const c = charOf(); return !c?.style?.face ? ['This character has no face to change'] : [row(...EXPRESSIONS.map((e) => btn(e, () => { pushUndo(); c.expr = e; drawFace(c); renderPanel('face'); }, c.expr === e)))]; },
+  hands: () => { const c = charOf(); return !c?.fingers?.[1]?.length ? ['This character has no posable fingers'] : [row(...['open', 'relaxed', 'fist', 'point', 'peace', 'thumbsup'].map((h) => btn(h, () => { pushUndo(); setHand(c, h); renderPanel('hands'); }, c.hand === h)))]; },
   color: () => {
     if (sel?.prop) return [swatches('#' + sel.prop.material.color.getHexString(), (col) => sel.prop.material.color.set(col))];
     const c = charOf(); return c ? [swatches(c.color, (col) => { c.color = col; tint(c); })] : [];
@@ -520,7 +591,7 @@ $('#file').onchange = async (e) => {
 function screenshot() {
   const hidden = [tc.getHelper(), arrows, grid, ...chars.flatMap((c) => c.dots)].filter((o) => o.visible);
   hidden.forEach((o) => (o.visible = false));
-  renderer.render(scene, camera);
+  (outlines ? effect : renderer).render(scene, camera);
   const b64 = renderer.domElement.toDataURL('image/png').split(',')[1];
   hidden.forEach((o) => (o.visible = true));
   saveFile(b64, 'image/png', `poseme-${Date.now()}.png`);
@@ -555,8 +626,8 @@ document.querySelectorAll('[data-panel]').forEach((b) => (b.onclick = () => (ope
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
 renderer.setAnimationLoop(() => {
-  for (const c of chars) if (c.type === 'poseme') updateTubes(c);
-  renderer.render(scene, camera);
+  for (const c of chars) if (c.rig) updateTubes(c);
+  (outlines ? effect : renderer).render(scene, camera);
 });
 
 // test hook for automated checks
