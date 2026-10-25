@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
 import { polygonizeSdf } from './lib/sdf.js';
@@ -79,6 +81,7 @@ const LIMBS = [['shoulderL', 'elbowL', 'wristL', 'arm'], ['shoulderR', 'elbowR',
   ['hipL', 'kneeL', 'ankleL', 'leg'], ['hipR', 'kneeR', 'ankleR', 'leg']];
 const STYLES = {
   poseme: { label: 'Poseme (sheet)', color: '#efe9df', head: 0.24, headShape: 'sphere', face: true, torso: 'sdf', sdf: 'poseme', w: 1, hipW: 1.17, arm: 0.062, leg: 0.075, hand: 'sdf', foot: 'ellipsoid', footR: [0.078, 0.06, 0.12], footOff: [0, -0.02, 0.045], armK: 1, legK: 1, torsoK: 1 },
+  chibigirl: { label: 'Chibi Girl', color: '#d9d6d1', head: 0.3, headShape: 'sdf', face: false, torso: 'sdf', sdf: 'chibi', noNeck: true, noShoulderBall: true, w: 1, hipW: 1.31, arm: 0.04, leg: 0.085, legTaper: 1.65, hand: 'sdfw', foot: 'sdfw', armK: 0.66, legK: 1, torsoK: 0.63 },
   blob: { label: 'Blob Buddy', color: '#fbfbfd', head: 0.3, headShape: 'ellipsoid', headR: [0.37, 0.27, 0.3], headY: 0.257, face: true, faceKind: 'blob', torso: 'sdf', sdf: 'blob', noNeck: true, noShoulderBall: true, w: 1, hipW: 1.45, arm: 0.062, leg: 0.074, hand: 'none', foot: 'ellipsoid', footR: [0.092, 0.052, 0.115], footOff: [0, -0.025, 0.03], armK: 0.63, legK: 0.39, torsoK: 0.6 },
   female: { label: 'Poseme Girl', color: '#f2e4d6', head: 0.235, headShape: 'sphere', face: true, lashes: true, hair: true, torso: 'smooth', w: 0.88, hipW: 1.15, arm: 0.042, leg: 0.058, hand: 'glove', foot: 'boot', armK: 0.95, legK: 1.03, torsoK: 0.95 },
   chibi: { label: 'Chibi', color: '#efe9df', head: 0.33, headShape: 'sphere', face: true, torso: 'smooth', w: 0.9, arm: 0.045, leg: 0.06, hand: 'glove', foot: 'boot', armK: 0.62, legK: 0.55, torsoK: 0.7 },
@@ -209,7 +212,9 @@ function buildRig(type) {
   // head
   const hr = st.head;
   const headGeo = st.headShape === 'box' ? new THREE.BoxGeometry(hr * 1.7, hr * 1.7, hr * 1.7) : st.headShape === 'ellipsoid' ? new THREE.SphereGeometry(1, 56, 32) : new THREE.SphereGeometry(hr, 48, 32);
-  const head = mesh(headGeo, J.head, [0, st.headY ?? hr * 0.9, 0], st.headShape === 'egg' ? [0.82, 1.12, 0.9] : st.headR || null, c.headMat || c.mat, true);
+  c.group.updateMatrixWorld(true);
+  const wp = (j) => J[j].getWorldPosition(new THREE.Vector3()).negate().toArray();
+  const head = st.headShape === 'sdf' ? mesh(sdfGeo(st.sdf + '-head', SDF[st.sdf].head), J.head, wp('head'), null, c.mat, true) : mesh(headGeo, J.head, [0, st.headY ?? hr * 0.9, 0], st.headShape === 'egg' ? [0.82, 1.12, 0.9] : st.headR || null, c.headMat || c.mat, true);
   if (st.hair) {
     const hairMat = new THREE.MeshStandardMaterial({ color: '#4a3326', roughness: 0.7 });
     mesh(new THREE.SphereGeometry(0.095, 20, 14), J.head, [0, hr * 1.55, -hr * 0.55], null, hairMat, true);
@@ -223,7 +228,8 @@ function buildRig(type) {
     c.elbowBalls = (c.elbowBalls || []).concat(ball('elbow', st.arm * (st.balls ? 1.35 : 1)), ball('knee', st.leg * (st.balls ? 1.35 : 1)));
     if (st.balls) { ball('wrist', st.arm * 1.2); ball('ankle', st.leg * 1.2); ball('hip', st.leg * 1.3); }
     const hand = J['wrist' + S];
-    if (st.hand === 'sdf') {
+    if (st.hand === 'sdfw') mesh(sdfGeo(st.sdf + '-hand' + S, SDF[st.sdf]['hand' + S]), hand, wp('wrist' + S), null);
+    else if (st.hand === 'sdf') {
       const hm = mesh(sdfGeo(st.sdf + '-hand' + S, SDF[st.sdf][s === 1 ? 'hand' : 'handR']), hand, [0, 0, 0], null);
       hm.rotation.z = s * Math.PI / 2; hm.scale.setScalar(SDF[st.sdf].handScale); // spec hand hangs along -Y; rig arm runs along ±X
     } else if (st.hand === 'none') mesh(new THREE.SphereGeometry(st.arm, 18, 12), hand, [0, 0, 0], null);
@@ -243,7 +249,8 @@ function buildRig(type) {
     } else if (st.hand === 'ball') mesh(new THREE.SphereGeometry(0.04, 14, 10), hand, [s * 0.04, 0, 0], null);
     else mesh(new THREE.BoxGeometry(0.08, 0.03, 0.065), hand, [s * 0.05, 0, 0], null);
     const foot = J['ankle' + S];
-    if (st.foot === 'ellipsoid') mesh(new THREE.SphereGeometry(1, 24, 16), foot, st.footOff, st.footR);
+    if (st.foot === 'sdfw') mesh(sdfGeo(st.sdf + '-boot' + S, SDF[st.sdf]['boot' + S]), foot, wp('ankle' + S), null);
+    else if (st.foot === 'ellipsoid') mesh(new THREE.SphereGeometry(1, 24, 16), foot, st.footOff, st.footR);
     else if (st.foot === 'boot') {
       mesh(new THREE.CylinderGeometry(0.082, 0.075, 0.1, 18), foot, [0, 0.035, 0], null);
       mesh(new THREE.SphereGeometry(0.088, 20, 14), foot, [0, -0.025, 0.06], [1, 0.62, 1.6]);
@@ -260,6 +267,17 @@ function buildRig(type) {
 }
 
 const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3();
+// widen a tube ring by ring from 1 at the hip to `end` at the ankle (flared trousers / bell-bottoms)
+function taper(geo, curve, segs, radial, end) {
+  const pos = geo.attributes.position, p = new THREE.Vector3(), v = new THREE.Vector3();
+  for (let i = 0; i <= segs; i++) {
+    curve.getPointAt(i / segs, p);
+    const k = 1 + (end - 1) * (i / segs) ** 2;
+    for (let j = 0; j <= radial; j++) { const n = i * (radial + 1) + j; v.fromBufferAttribute(pos, n).sub(p).multiplyScalar(k).add(p); pos.setXYZ(n, v.x, v.y, v.z); }
+  }
+  pos.needsUpdate = true; geo.computeVertexNormals();
+}
+
 function updateTubes(c) {
   for (const t of c.tubes) {
     const [ja, jb, jc, part] = t.userData.limb, r = c.style[part];
@@ -280,6 +298,7 @@ function updateTubes(c) {
     const thin = 1 / Math.sqrt(c.joints[ja].userData.stretch); // volume preservation
     t.geometry.dispose();
     t.geometry = new THREE.TubeGeometry(curve, 48, r * thin, c.style.square ? 4 : 12, false);
+    if (part === 'leg' && c.style.legTaper) taper(t.geometry, curve, 48, 12, c.style.legTaper);
   }
   for (const b of c.elbowBalls) b.visible = !c.hose;
 }
@@ -324,15 +343,15 @@ const loader = new GLTFLoader();
 const MAJOR_BONE = /(Hips|Spine\d?|Neck|Head|Shoulder|Arm|ForeArm|Hand|UpLeg|Leg|Foot)$/;
 
 async function buildGltf(type) {
-  gltfCache[type] ??= loader.loadAsync(MODELS[type][1]);
-  const gltf = await gltfCache[type];
-  const root = SkeletonUtils.clone(gltf.scene);
+  const src = IMPORTS[type]?.root ?? (await (gltfCache[type] ??= loader.loadAsync(MODELS[type][1]))).scene;
+  const root = SkeletonUtils.clone(src);
   const c = { type, group: new THREE.Group(), joints: {}, dots: [], color: '#ffffff', squash: 1, hose: false, bend: 1, tubes: [], hand: 'relaxed', expr: 'smile' };
   c.group.add(root);
   root.traverse((o) => {
     if (o.isMesh) {
       o.castShadow = o.receiveShadow = true; o.userData.char = c; o.frustumCulled = false;
-      o.material = o.material.clone(); o.userData.baseColor = o.material.color.clone();
+      if (Array.isArray(o.material)) o.material = o.material[0];
+      o.material = o.material.clone(); o.userData.baseColor = (o.material.color ?? new THREE.Color(1, 1, 1)).clone();
     }
   });
   // skinned bounds are only right once bone matrices are current; without this some models load huge
@@ -346,9 +365,11 @@ async function buildGltf(type) {
   const ws = new THREE.Vector3();
   const bones = []; root.traverse((o) => o.isBone && bones.push(o));
   const major = bones.filter((o) => MAJOR_BONE.test(o.name));
-  const pick = major.length >= 8 ? major : bones.filter((o) => !SKIP_BONE.test(o.name) && o.children.some((ch) => ch.isBone));
+  c.autoRig = !!src.userData.autoRig;
+  const pick = c.autoRig ? bones : major.length >= 8 ? major : bones.filter((o) => !SKIP_BONE.test(o.name) && o.children.some((ch) => ch.isBone));
   for (const o of pick) {
-    o.userData = { stretch: 1, base: null, rest: o.quaternion.clone() };
+    o.userData = { stretch: 1, base: c.autoRig && o.name === 'hips' ? o.position.clone() : null, rest: o.quaternion.clone() };
+    if (c.autoRig && o.name === 'hips') { c.hipsY = o.position.y; c.style = { legK: o.position.y / 0.95 }; }
     c.joints[o.name] = o;
     const dot = makeDot(boneSide(o.name), 0.03);
     o.getWorldScale(ws); dot.scale.divide(ws);
@@ -359,10 +380,101 @@ async function buildGltf(type) {
 }
 
 function tint(c) {
-  if (c.rig) { c.mat.color.set(c.color); drawFace(c); return; }
-  const col = new THREE.Color(c.color);
-  c.group.traverse((o) => { if (o.isMesh && o.userData.baseColor) o.material.color.copy(o.userData.baseColor).multiply(col); });
+  if (cel) setCel(c, false);
+  if (c.rig) { c.mat.color.set(c.color); drawFace(c); }
+  else {
+    const col = new THREE.Color(c.color);
+    c.group.traverse((o) => { if (o.isMesh && o.userData.baseColor) o.material.color.copy(o.userData.baseColor).multiply(col); });
+  }
+  if (cel) setCel(c, true);
 }
+
+// ---------- imported models (FBX / GLB / GLTF / OBJ) ----------
+const IMPORTS = {};
+let importN = 0;
+async function importModel(file) {
+  const name = file.name.toLowerCase(), buf = await file.arrayBuffer();
+  let root;
+  if (name.endsWith('.fbx')) root = new FBXLoader().parse(buf, '');
+  else if (name.endsWith('.obj')) root = new OBJLoader().parse(new TextDecoder().decode(buf));
+  else root = (await loader.parseAsync(buf, '')).scene;
+  let skinned = false;
+  root.traverse((o) => { if (o.isSkinnedMesh) skinned = true; });
+  if (!skinned) root = autoRig(root);
+  const t = 'import:' + ++importN;
+  IMPORTS[t] = { root, label: file.name.replace(/\.[^.]+$/, '') };
+  return t;
+}
+
+// Fit the Poseme joint layout to an unrigged mesh's bounds and skin every vertex to its two nearest bones.
+// shortcut: assumes an upright figure facing +Z, T-pose (or arms down if the model is narrow); a manual rig editor is the upgrade.
+function autoRig(src) {
+  src.updateMatrixWorld(true);
+  const parts = [];
+  src.traverse((o) => { if (o.isMesh) parts.push([o.geometry.clone().applyMatrix4(o.matrixWorld), Array.isArray(o.material) ? o.material[0] : o.material]); });
+  if (!parts.length) throw new Error('no meshes in the file');
+  const box = new THREE.Box3();
+  for (const [g] of parts) { g.computeBoundingBox(); box.union(g.boundingBox); }
+  const h = box.max.y - box.min.y, half = (box.max.x - box.min.x) / 2, s = h / 2.0;
+  const cx = (box.min.x + box.max.x) / 2, cz = (box.min.z + box.max.z) / 2, tpose = half * 2 > 0.6 * h;
+  const tw = {}, W = {};
+  for (const [n, par, off] of RIG) tw[n] = (par ? tw[par].clone() : new THREE.Vector3(0, 0.95, 0)).add(new THREE.Vector3(...off));
+  for (const [n, , , side] of RIG) {
+    const p = tw[n]; let x = p.x * s, y = box.min.y + p.y * s;
+    const arm = /^(shoulder|elbow|wrist)/.exec(n)?.[1];
+    if (arm && tpose) x = side * { shoulder: 0.12 * s, elbow: 0.12 * s + (half * 0.9 - 0.12 * s) * 0.52, wrist: half * 0.9 }[arm];
+    else if (arm) { x = side * 0.17 * s; y = box.min.y + tw.shoulderL.y * s - { shoulder: 0, elbow: 0.27, wrist: 0.52 }[arm] * s; }
+    W[n] = new THREE.Vector3(cx + x, y, cz);
+  }
+  const bones = {}, list = [];
+  for (const [n, par] of RIG) {
+    const b = new THREE.Bone(); b.name = n;
+    b.position.copy(W[n]).sub(par ? W[par] : new THREE.Vector3());
+    if (par) bones[par].add(b);
+    bones[n] = b; list.push(b);
+  }
+  // each segment belongs to the bone it starts at; leaf bones get a short segment past their end
+  const segs = [];
+  for (const [n, par] of RIG) if (par) segs.push([list.findIndex((b) => b.name === par), W[par], W[n]]);
+  const leaf = { head: [0, 0.3, 0], wristL: [0.12, 0, 0], wristR: [-0.12, 0, 0], ankleL: [0, -0.04, 0.1], ankleR: [0, -0.04, 0.1] };
+  for (const [n, d] of Object.entries(leaf)) segs.push([list.findIndex((b) => b.name === n), W[n], W[n].clone().add(new THREE.Vector3(...d).multiplyScalar(s))]);
+  const seg = new THREE.Line3(), v = new THREE.Vector3(), q = new THREE.Vector3();
+  const out = new THREE.Group(); out.add(bones.hips); out.updateMatrixWorld(true);
+  const skel = new THREE.Skeleton(list);
+  for (const [g, mat] of parts) {
+    const pos = g.attributes.position, n = pos.count, si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      v.fromBufferAttribute(pos, i);
+      const best = new Map();
+      for (const [bi, a, b] of segs) { seg.set(a, b); seg.closestPointToPoint(v, true, q); const d = q.distanceTo(v); if (!(best.get(bi) <= d)) best.set(bi, d); }
+      const top = [...best].sort((x, y) => x[1] - y[1]).slice(0, 2);
+      const w = top.map(([, d]) => 1 / (d ** 4 + 1e-9)), sum = w[0] + (w[1] || 0);
+      top.forEach(([bi], k) => { si[i * 4 + k] = bi; sw[i * 4 + k] = w[k] / sum; });
+    }
+    g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
+    g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
+    if (!g.attributes.normal) g.computeVertexNormals();
+    const m = new THREE.SkinnedMesh(g, mat ?? new THREE.MeshStandardMaterial({ color: 0xdddddd }));
+    out.add(m); m.bind(skel);
+  }
+  out.userData.autoRig = true;
+  return out;
+}
+
+// ---------- 2D cel shading (flat colour + one hard shadow band) ----------
+let cel = false;
+const toonRamp = new THREE.DataTexture(new Uint8Array([140, 140, 140, 255, 255, 255, 255, 255]), 2, 1);
+toonRamp.minFilter = toonRamp.magFilter = THREE.NearestFilter; toonRamp.needsUpdate = true;
+function setCel(c, on) {
+  c.group.traverse((o) => {
+    if (!o.isMesh || o.userData.isDot) return;
+    if (on) {
+      const pbr = (o.userData.pbrMat ??= o.material);
+      o.material = new THREE.MeshToonMaterial({ color: pbr.color, map: pbr.map ?? null, gradientMap: toonRamp });
+    } else if (o.userData.pbrMat) { o.material = o.userData.pbrMat; delete o.userData.pbrMat; }
+  });
+}
+function toggleCel() { cel = !cel; chars.forEach((c) => setCel(c, cel)); toast(cel ? '2D cel shading on' : '2D cel shading off'); }
 
 // ---------- world state ----------
 const chars = [], props = [];
@@ -371,6 +483,7 @@ let showDots = true;
 
 async function addCharacter(type, state) {
   const c = STYLES[type] ? buildRig(type) : await buildGltf(type);
+  if (cel) setCel(c, true);
   scene.add(c.group);
   chars.push(c);
   if (state) applyCharState(c, state);
@@ -416,7 +529,10 @@ async function loadScene(st) {
   for (const c of chars) scene.remove(c.group);
   for (const p of props) scene.remove(p);
   chars.length = props.length = 0;
-  for (const s of st.chars) await addCharacter(s.type, s);
+  for (const s of st.chars) {
+    if (!STYLES[s.type] && !MODELS[s.type] && !IMPORTS[s.type]) { toast('Imported model not loaded; import it again'); continue; }
+    await addCharacter(s.type, s);
+  }
   for (const p of st.props || []) addProp(p.kind, p);
 }
 
@@ -441,7 +557,7 @@ const PRESETS = {
   Sad: { spine: [15, 0, 0], neck: [20, 0, 0], head: [15, 0, 0], shoulderL: [10, 0, -80], shoulderR: [10, 0, 80] },
 };
 function applyPreset(c, name) {
-  if (!c.rig) return toast('Presets work on the Poseme-family characters');
+  if (!c.rig && !c.autoRig) return toast('Presets work on Poseme characters and auto-rigged imports');
   pushUndo();
   const p = PRESETS[name];
   for (const [k, j] of Object.entries(c.joints)) {
@@ -449,6 +565,7 @@ function applyPreset(c, name) {
     j.quaternion.setFromEuler(new THREE.Euler(e[0] * D2R, e[1] * D2R, e[2] * D2R));
   }
   c.joints.hips.userData.base.set(0, c.hipsY + (p._y || 0) * c.style.legK, 0);
+  if (c.autoRig) c.joints.hips.position.copy(c.joints.hips.userData.base);
   applyStretch(c);
   if (name === 'Sad') { c.expr = 'sad'; drawFace(c); }
 }
@@ -460,7 +577,7 @@ function resetPose(c) {
 }
 const swapSide = (n) => n.replace(/L$|R$|Left|Right/, (m) => ({ L: 'R', R: 'L', Left: 'Right', Right: 'Left' }[m]));
 function mirror(c) {
-  if (!c.rig) return toast('Mirror works on the Poseme-family characters');
+  if (!c.rig && !c.autoRig) return toast('Mirror works on Poseme characters and auto-rigged imports');
   pushUndo();
   const snap = Object.fromEntries(Object.entries(c.joints).map(([k, j]) => [k, [j.quaternion.clone(), j.userData.stretch]]));
   for (const [k, [q, s]] of Object.entries(snap)) {
@@ -545,6 +662,8 @@ const PANELS = {
     'Open-source rigged models',
     row(...Object.entries(MODELS).map(([t, [l]]) =>
       btn(l, async () => { pushUndo(); toast('Loading ' + l + '…'); select({ char: await addCharacter(t) }); }))),
+    'Your models (FBX, GLB, GLTF, OBJ). Models without bones get an automatic rig.',
+    row(btn('Import model…', () => pickFile('model')), ...Object.entries(IMPORTS).map(([t, m]) => btn(m.label, async () => { pushUndo(); select({ char: await addCharacter(t) }); }))),
     'Props', row(...Object.keys(PROP_GEOS).map((k) => btn(k, () => { pushUndo(); select({ prop: addProp(k) }); }))),
   ],
   poses: () => {
@@ -569,7 +688,8 @@ const PANELS = {
     slider('Intensity', 0, 5, 0.05, light.power, (v) => { light.power = v; updateLight(); }),
     row(btn('Shadows', () => { sun.castShadow = !sun.castShadow; renderPanel('light'); }, sun.castShadow),
       btn('Arrows', () => { arrows.visible = !arrows.visible; renderPanel('light'); }, arrows.visible),
-      btn('Outlines', () => { outlines = !outlines; renderPanel('light'); }, outlines)),
+      btn('Outlines', () => { outlines = !outlines; renderPanel('light'); }, outlines),
+      btn('2D cel shading', () => { toggleCel(); renderPanel('light'); }, cel)),
   ],
   camera: () => [
     slider('Field of view', 15, 100, 1, camera.fov, (v) => { camera.fov = v; camera.updateProjectionMatrix(); }),
@@ -615,10 +735,14 @@ function saveFile(b64, mime, name) {
   const a = document.createElement('a'); a.href = `data:${mime};base64,${b64}`; a.download = name; a.click();
 }
 let pickKind = null;
-function pickFile(kind) { pickKind = kind; const f = $('#file'); f.value = ''; f.accept = kind === 'json' ? '.json,application/json' : 'image/*'; f.click(); }
+function pickFile(kind) { pickKind = kind; const f = $('#file'); f.value = ''; f.accept = kind === 'json' ? '.json,application/json' : kind === 'model' ? '.fbx,.glb,.gltf,.obj' : 'image/*'; f.click(); }
 $('#file').onchange = async (e) => {
   const file = e.target.files[0]; if (!file) return;
-  if (pickKind === 'json') {
+  if (pickKind === 'model') {
+    toast('Importing ' + file.name + '…');
+    try { const t = await importModel(file); pushUndo(); select({ char: await addCharacter(t) }); toast(IMPORTS[t].root.userData.autoRig ? 'Auto-rigged ' + file.name : 'Imported ' + file.name); if (openPanel === 'add') renderPanel('add'); }
+    catch (err) { toast('Could not import: ' + err.message); }
+  } else if (pickKind === 'json') {
     try { const st = JSON.parse(await file.text()); pushUndo(); await loadScene(st); toast('Scene imported'); } catch { toast('Not a Poseme scene file'); }
   } else {
     const url = URL.createObjectURL(file);
@@ -639,6 +763,7 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.style.displa
 
 // ---------- toolbar wiring ----------
 const ACTS = {
+  cel: () => toggleCel(),
   shot: screenshot, undo, redo, mode: cycleMode,
   save: () => { const saved = JSON.parse(safeGet('poseme.saves') || '[]'); saved.unshift({ name: 'Quick ' + new Date().toLocaleString(), st: sceneState() }); safeSet('poseme.saves', JSON.stringify(saved.slice(0, 30))); toast('Scene saved'); },
   mirror: () => sel?.char && mirror(sel.char),
@@ -668,7 +793,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // test hook for automated checks
-window.poseme = { chars, props, addCharacter, applyPreset, mirror, select, sceneState, loadScene, undo, applyStretch, setHand, drawFace, renderPanel, scene, camera, orbit, THREE };
+window.poseme = { chars, props, addCharacter, applyPreset, mirror, select, sceneState, loadScene, undo, applyStretch, setHand, drawFace, renderPanel, scene, camera, orbit, THREE, IMPORTS, importModel };
 
 await addCharacter('poseme');
 $('#loading').remove();
