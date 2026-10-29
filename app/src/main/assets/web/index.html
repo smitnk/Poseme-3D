@@ -15,7 +15,7 @@ canvas{display:block;touch-action:none}
 #undo{left:6px;bottom:62px}
 #sel{left:0;right:0;bottom:6px;justify-content:center;flex-wrap:wrap;padding:0 6px;display:none}
 #sel button{font-size:16px;min-width:40px;height:40px}
-.panel{position:fixed;left:8px;right:8px;bottom:56px;max-height:46vh;overflow:auto;background:rgba(25,25,25,.9);border-radius:14px;padding:10px;z-index:6;display:none}
+.panel{position:fixed;left:8px;right:8px;bottom:56px;max-height:62vh;overflow:auto;background:rgba(25,25,25,.9);border-radius:14px;padding:10px;z-index:6;display:none}
 .panel h3{margin:2px 0 8px;font-size:15px;display:flex;justify-content:space-between}
 .panel .row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;align-items:center}
 .panel button{font-size:14px;height:38px}
@@ -24,6 +24,11 @@ canvas{display:block;touch-action:none}
 .panel input[type=color]{width:44px;height:36px;border:0;background:none}
 .sw{width:34px!important;min-width:34px!important;height:34px!important;border-radius:50%!important}
 #toast{position:fixed;left:50%;top:60px;transform:translateX(-50%);background:rgba(0,0,0,.8);padding:8px 14px;border-radius:20px;display:none;z-index:9}
+#panel .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+#panel .card{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;height:auto;padding:6px;background:rgba(255,255,255,.06);border-radius:12px}
+#panel .card img{width:100%;aspect-ratio:4/5;object-fit:contain}
+#panel .card span{font-size:12px;line-height:1.2;text-align:center}
+#panel .card .rm{position:absolute;top:2px;right:6px;font-size:14px;opacity:.8}
 #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-size:18px;z-index:10;background:#8a8a8a}
 </style>
 <script type="importmap">{"imports":{"three":"./lib/three.module.min.js","three/addons/":"./lib/addons/"}}</script>

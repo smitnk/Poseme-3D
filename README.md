@@ -14,6 +14,8 @@ A PoseMyArt-style 3D posing app for Android, starring the character from the Pos
 - **Chibi Girl** from the clay render (img2threejs), with flared legs and block boots.
 - **Import your own models**: FBX, GLB/GLTF (single file) and OBJ. Rigged models keep their bones; models without bones get an automatic Poseme rig (T-pose works best), so presets and mirror work on them.
 - **2D cel shading** (◐ button or Light panel): flat colour with one hard shadow band, for 2D animation reference.
+- **Android-3D-Model-Forge characters**: Clay Chibi, Forge Kid, Gorilla, Round Buddy, Snow Buddy (from smitnk/Android-3D-Model-Forge), re-skinned with smooth weights on their own joints.
+- **Add panel picture cards**, and imported models are saved on the phone (My models; ✕ removes one).
 - **Open-source rigged models**: X Bot, Soldier, Michelle, Robot (three.js repo), Cesium Man and Rigged Figure (Khronos glTF-Sample-Assets). Add several characters, duplicate, recolour, lock, hide joints, delete.
 - **Props**: box, sphere, cylinder, cone, torus, step, with move, rotate and scale.
 - **Scene**: light direction/height/intensity with arrows and shadows, background colour or photo, grid/floor toggles, camera FOV and front/back/side/top views.

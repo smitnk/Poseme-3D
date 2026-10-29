@@ -20,7 +20,7 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.prepend(renderer.domElement);
 
-const effect = new OutlineEffect(renderer, { defaultThickness: 0.014, defaultColor: [0.08, 0.08, 0.08] });
+const effect = new OutlineEffect(renderer, { defaultThickness: 0.017, defaultColor: [0, 0, 0], defaultAlpha: 1 });
 let outlines = true;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8a8a8a);
@@ -334,6 +334,9 @@ function setHand(c, pose) {
 const MODELS = {
   xbot: ['X Bot', 'models/Xbot.glb'], soldier: ['Soldier', 'models/Soldier.glb'], michelle: ['Michelle', 'models/Michelle.glb'],
   robot: ['Robot', 'models/RobotExpressive.glb'], cesium: ['Cesium Man', 'models/CesiumMan.glb'], figure: ['Rigged Figure', 'models/RiggedFigure.glb'],
+  // from smitnk/Android-3D-Model-Forge; their rigid per-part skin is replaced by the smooth auto-rig
+  claychibi: ['Clay Chibi', 'models/clay-chibi.glb', true], forgekid: ['Forge Kid', 'models/forge-kid.glb', true], gorilla: ['Gorilla', 'models/gorilla.glb', true],
+  roundbuddy: ['Round Buddy', 'models/round-buddy.glb', true], snowbuddy: ['Snow Buddy', 'models/snow-buddy.glb', true],
 };
 const SKIP_BONE = /end|top|finger|thumb|index|middle|ring|pinky|toe|eye|jaw|palm\d|_nub|tongue/i;
 const boneSide = (n) => (/left/i.test(n) || /(^|[_.\s])L([_.\s\d]|$)/.test(n) || /[a-z]L$/.test(n) ? 1
@@ -343,7 +346,7 @@ const loader = new GLTFLoader();
 const MAJOR_BONE = /(Hips|Spine\d?|Neck|Head|Shoulder|Arm|ForeArm|Hand|UpLeg|Leg|Foot)$/;
 
 async function buildGltf(type) {
-  const src = IMPORTS[type]?.root ?? (await (gltfCache[type] ??= loader.loadAsync(MODELS[type][1]))).scene;
+  const src = IMPORTS[type]?.root ?? (await (gltfCache[type] ??= loader.loadAsync(MODELS[type][1]).then((g) => (MODELS[type][2] ? { scene: autoRig(g.scene) } : g)))).scene;
   const root = SkeletonUtils.clone(src);
   const c = { type, group: new THREE.Group(), joints: {}, dots: [], color: '#ffffff', squash: 1, hose: false, bend: 1, tubes: [], hand: 'relaxed', expr: 'smile' };
   c.group.add(root);
@@ -392,7 +395,21 @@ function tint(c) {
 // ---------- imported models (FBX / GLB / GLTF / OBJ) ----------
 const IMPORTS = {};
 let importN = 0;
-async function importModel(file) {
+// saved imports live in IndexedDB so they survive app restarts
+const idb = new Promise((res, rej) => { try { const r = indexedDB.open('poseme', 1); r.onupgradeneeded = () => r.result.createObjectStore('imports'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); } catch (e) { rej(e); } });
+const idbDo = (mode, fn) => idb.then((db) => new Promise((res, rej) => { const tx = db.transaction('imports', mode); const out = fn(tx.objectStore('imports')); tx.oncomplete = () => res(out.result); tx.onerror = () => rej(tx.error); }));
+async function restoreImports() {
+  try {
+    const keys = await idbDo('readonly', (st) => st.getAllKeys());
+    for (const k of keys) {
+      const rec = await idbDo('readonly', (st) => st.get(k));
+      try { await importModel(new File([rec.data], rec.name), k, rec.thumb); } catch { /* skip a file that no longer parses */ }
+    }
+  } catch { /* no IndexedDB (private mode): imports stay session-only */ }
+}
+async function removeImport(t) { delete IMPORTS[t]; try { await idbDo('readwrite', (st) => st.delete(t)); } catch {} }
+
+async function importModel(file, id, thumb) {
   const name = file.name.toLowerCase(), buf = await file.arrayBuffer();
   let root;
   if (name.endsWith('.fbx')) root = new FBXLoader().parse(buf, '');
@@ -401,17 +418,32 @@ async function importModel(file) {
   let skinned = false;
   root.traverse((o) => { if (o.isSkinnedMesh) skinned = true; });
   if (!skinned) root = autoRig(root);
-  const t = 'import:' + ++importN;
-  IMPORTS[t] = { root, label: file.name.replace(/\.[^.]+$/, '') };
+  const t = id ?? 'import:' + Date.now().toString(36) + ++importN;
+  IMPORTS[t] = { root, label: file.name.replace(/\.[^.]+$/, ''), thumb };
+  if (!id) {
+    IMPORTS[t].thumb = await makeThumb(t);
+    try { await idbDo('readwrite', (st) => st.put({ name: file.name, data: buf, thumb: IMPORTS[t].thumb }, t)); } catch { toast('Could not save to your library; it stays until you close the app'); }
+  }
   return t;
 }
 
 // Fit the Poseme joint layout to an unrigged mesh's bounds and skin every vertex to its two nearest bones.
 // shortcut: assumes an upright figure facing +Z, T-pose (or arms down if the model is narrow); a manual rig editor is the upgrade.
+// Blender/Rigify-style bone names (used by Android-3D-Model-Forge and many hand-made rigs) -> Poseme joints
+const BLENDER_BONES = { hips: 'pelvis', spine: 'spine', neck: 'neck', head: 'head', shoulderL: 'upper_arm.L', elbowL: 'forearm.L', wristL: 'hand.L',
+  shoulderR: 'upper_arm.R', elbowR: 'forearm.R', wristR: 'hand.R', hipL: 'thigh.L', kneeL: 'shin.L', ankleL: 'foot.L', hipR: 'thigh.R', kneeR: 'shin.R', ankleR: 'foot.R' };
 function autoRig(src) {
+  src.traverse((o) => o.isSkinnedMesh && o.skeleton.pose());
   src.updateMatrixWorld(true);
+  const key = (n) => n.replace(/[.:\s]/g, ''); // the glTF loader strips dots from node names
+  const old = {}; src.traverse((o) => { if (o.isBone) old[key(o.name)] = o; });
+  const useOld = Object.values(BLENDER_BONES).every((n) => old[key(n)]);
   const parts = [];
-  src.traverse((o) => { if (o.isMesh) parts.push([o.geometry.clone().applyMatrix4(o.matrixWorld), Array.isArray(o.material) ? o.material[0] : o.material]); });
+  src.traverse((o) => {
+    if (!o.isMesh) return;
+    const g = o.geometry.clone(); g.deleteAttribute('skinIndex'); g.deleteAttribute('skinWeight');
+    parts.push([g.applyMatrix4(o.matrixWorld), Array.isArray(o.material) ? o.material[0] : o.material]);
+  });
   if (!parts.length) throw new Error('no meshes in the file');
   const box = new THREE.Box3();
   for (const [g] of parts) { g.computeBoundingBox(); box.union(g.boundingBox); }
@@ -426,6 +458,10 @@ function autoRig(src) {
     else if (arm) { x = side * 0.17 * s; y = box.min.y + tw.shoulderL.y * s - { shoulder: 0, elbow: 0.27, wrist: 0.52 }[arm] * s; }
     W[n] = new THREE.Vector3(cx + x, y, cz);
   }
+  if (useOld) { // keep the model's own joint placement, only the skin weights are rebuilt
+    for (const [n, b] of Object.entries(BLENDER_BONES)) W[n] = old[key(b)].getWorldPosition(new THREE.Vector3());
+    W.chest = W.spine.clone().lerp(W.neck, 0.5);
+  }
   const bones = {}, list = [];
   for (const [n, par] of RIG) {
     const b = new THREE.Bone(); b.name = n;
@@ -436,7 +472,7 @@ function autoRig(src) {
   // each segment belongs to the bone it starts at; leaf bones get a short segment past their end
   const segs = [];
   for (const [n, par] of RIG) if (par) segs.push([list.findIndex((b) => b.name === par), W[par], W[n]]);
-  const leaf = { head: [0, 0.3, 0], wristL: [0.12, 0, 0], wristR: [-0.12, 0, 0], ankleL: [0, -0.04, 0.1], ankleR: [0, -0.04, 0.1] };
+  const leaf = { head: [0, (box.max.y - W.head.y) / s, 0], wristL: [0.12, 0, 0], wristR: [-0.12, 0, 0], ankleL: [0, -0.04, 0.1], ankleR: [0, -0.04, 0.1] };
   for (const [n, d] of Object.entries(leaf)) segs.push([list.findIndex((b) => b.name === n), W[n], W[n].clone().add(new THREE.Vector3(...d).multiplyScalar(s))]);
   const seg = new THREE.Line3(), v = new THREE.Vector3(), q = new THREE.Vector3();
   const out = new THREE.Group(); out.add(bones.hips); out.updateMatrixWorld(true);
@@ -461,6 +497,27 @@ function autoRig(src) {
   return out;
 }
 
+// ---------- thumbnails (cards in the Add panel) ----------
+let thumbR, thumbFx;
+async function makeThumb(type) {
+  thumbR ??= new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+  thumbR.setSize(160, 200, false);
+  thumbFx ??= new OutlineEffect(thumbR, { defaultThickness: 0.012, defaultColor: [0, 0, 0] });
+  const sc = new THREE.Scene();
+  sc.add(new THREE.HemisphereLight(0xffffff, 0x777777, 1.6));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.6); dl.position.set(1, 2, 3); sc.add(dl);
+  const c = STYLES[type] ? buildRig(type) : await buildGltf(type);
+  sc.add(c.group); c.group.updateMatrixWorld(true);
+  if (c.rig) updateTubes(c);
+  c.dots.forEach((d) => (d.visible = false));
+  const box = new THREE.Box3().setFromObject(c.group, true), size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+  const half = Math.max(size.y / 2, size.x / 2 / 0.8) * 1.06;
+  const cam = new THREE.OrthographicCamera(-half * 0.8, half * 0.8, half, -half, 0.1, 50);
+  cam.position.set(ctr.x + half * 0.35, ctr.y + half * 0.1, ctr.z + 10); cam.lookAt(ctr);
+  thumbFx.render(sc, cam);
+  return thumbR.domElement.toDataURL('image/png');
+}
+
 // ---------- 2D cel shading (flat colour + one hard shadow band) ----------
 let cel = false;
 const toonRamp = new THREE.DataTexture(new Uint8Array([140, 140, 140, 255, 255, 255, 255, 255]), 2, 1);
@@ -471,7 +528,8 @@ function setCel(c, on) {
     if (on) {
       const pbr = (o.userData.pbrMat ??= o.material);
       o.material = new THREE.MeshToonMaterial({ color: pbr.color, map: pbr.map ?? null, gradientMap: toonRamp });
-    } else if (o.userData.pbrMat) { o.material = o.userData.pbrMat; delete o.userData.pbrMat; }
+      o.receiveShadow = false; // self-shadowing speckles the flat bands; keep the cast shadow on the floor
+    } else if (o.userData.pbrMat) { o.material = o.userData.pbrMat; delete o.userData.pbrMat; o.receiveShadow = true; }
   });
 }
 function toggleCel() { cel = !cel; chars.forEach((c) => setCel(c, cel)); toast(cel ? '2D cel shading on' : '2D cel shading off'); }
@@ -654,16 +712,32 @@ const swatches = (cur, fn) => {
   return r;
 };
 const charOf = () => sel?.char || chars[0];
+// picture cards like PoseMyArt's Add Models sheet
+function cards(items, removable) {
+  const g = document.createElement('div'); g.className = 'cards';
+  for (const [t, label, img] of items) {
+    const c = document.createElement('button'); c.className = 'card';
+    const im = new Image(); im.alt = ''; im.loading = 'lazy'; if (img) im.src = img; im.onerror = () => (im.style.visibility = 'hidden');
+    const cap = document.createElement('span'); cap.textContent = label;
+    c.append(im, cap);
+    c.onclick = async () => { pushUndo(); toast('Loading ' + label + '…'); select({ char: await addCharacter(t) }); };
+    if (removable) {
+      const x = document.createElement('span'); x.className = 'rm'; x.textContent = '✕'; x.title = 'Remove from my models';
+      x.onclick = async (e) => { e.stopPropagation(); await removeImport(t); renderPanel('add'); toast('Removed ' + label); };
+      c.append(x);
+    }
+    g.append(c);
+  }
+  return g;
+}
 
 const PANELS = {
   add: () => [
-    'Poseme characters (all features)',
-    row(...Object.entries(STYLES).map(([t, st]) => btn(st.label, async () => { pushUndo(); select({ char: await addCharacter(t) }); }))),
-    'Open-source rigged models',
-    row(...Object.entries(MODELS).map(([t, [l]]) =>
-      btn(l, async () => { pushUndo(); toast('Loading ' + l + '…'); select({ char: await addCharacter(t) }); }))),
-    'Your models (FBX, GLB, GLTF, OBJ). Models without bones get an automatic rig.',
-    row(btn('Import model…', () => pickFile('model')), ...Object.entries(IMPORTS).map(([t, m]) => btn(m.label, async () => { pushUndo(); select({ char: await addCharacter(t) }); }))),
+    'Poseme characters (all features)', cards(Object.entries(STYLES).map(([t, st]) => [t, st.label, 'thumbs/' + t + '.png'])),
+    'Rigged models', cards(Object.entries(MODELS).map(([t, [l]]) => [t, l, 'thumbs/' + t + '.png'])),
+    'My models (FBX, GLB, GLTF, OBJ; saved on this phone; models without bones are auto-rigged)',
+    row(btn('＋ Import model…', () => pickFile('model'))),
+    cards(Object.entries(IMPORTS).map(([t, m]) => [t, m.label, m.thumb]), true),
     'Props', row(...Object.keys(PROP_GEOS).map((k) => btn(k, () => { pushUndo(); select({ prop: addProp(k) }); }))),
   ],
   poses: () => {
@@ -793,7 +867,8 @@ renderer.setAnimationLoop(() => {
 });
 
 // test hook for automated checks
-window.poseme = { chars, props, addCharacter, applyPreset, mirror, select, sceneState, loadScene, undo, applyStretch, setHand, drawFace, renderPanel, scene, camera, orbit, THREE, IMPORTS, importModel };
+window.poseme = { chars, props, addCharacter, applyPreset, mirror, select, sceneState, loadScene, undo, applyStretch, setHand, drawFace, renderPanel, scene, camera, orbit, THREE, IMPORTS, importModel, makeThumb, STYLES, MODELS };
 
 await addCharacter('poseme');
 $('#loading').remove();
+restoreImports();
