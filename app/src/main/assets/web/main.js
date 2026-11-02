@@ -20,7 +20,7 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.prepend(renderer.domElement);
 
-const effect = new OutlineEffect(renderer, { defaultThickness: 0.017, defaultColor: [0, 0, 0], defaultAlpha: 1 });
+const effect = new OutlineEffect(renderer, { defaultThickness: 0.011, defaultColor: [0, 0, 0], defaultAlpha: 1 });
 let outlines = true;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8a8a8a);
@@ -403,13 +403,13 @@ async function restoreImports() {
     const keys = await idbDo('readonly', (st) => st.getAllKeys());
     for (const k of keys) {
       const rec = await idbDo('readonly', (st) => st.get(k));
-      try { await importModel(new File([rec.data], rec.name), k, rec.thumb); } catch { /* skip a file that no longer parses */ }
+      try { await importModel(new File([rec.data], rec.name), k, rec.thumb, rec.rig); } catch { /* skip a file that no longer parses */ }
     }
   } catch { /* no IndexedDB (private mode): imports stay session-only */ }
 }
 async function removeImport(t) { delete IMPORTS[t]; try { await idbDo('readwrite', (st) => st.delete(t)); } catch {} }
 
-async function importModel(file, id, thumb) {
+async function importModel(file, id, thumb, rig) {
   const name = file.name.toLowerCase(), buf = await file.arrayBuffer();
   let root;
   if (name.endsWith('.fbx')) root = new FBXLoader().parse(buf, '');
@@ -417,9 +417,10 @@ async function importModel(file, id, thumb) {
   else root = (await loader.parseAsync(buf, '')).scene;
   let skinned = false;
   root.traverse((o) => { if (o.isSkinnedMesh) skinned = true; });
-  if (!skinned) root = autoRig(root);
+  if (rig) root = autoRig(root, rig);
+  else if (!skinned) root = autoRig(root);
   const t = id ?? 'import:' + Date.now().toString(36) + ++importN;
-  IMPORTS[t] = { root, label: file.name.replace(/\.[^.]+$/, ''), thumb };
+  IMPORTS[t] = { root, label: file.name.replace(/\.[^.]+$/, ''), thumb, rig };
   if (!id) {
     IMPORTS[t].thumb = await makeThumb(t);
     try { await idbDo('readwrite', (st) => st.put({ name: file.name, data: buf, thumb: IMPORTS[t].thumb }, t)); } catch { toast('Could not save to your library; it stays until you close the app'); }
@@ -432,7 +433,7 @@ async function importModel(file, id, thumb) {
 // Blender/Rigify-style bone names (used by Android-3D-Model-Forge and many hand-made rigs) -> Poseme joints
 const BLENDER_BONES = { hips: 'pelvis', spine: 'spine', neck: 'neck', head: 'head', shoulderL: 'upper_arm.L', elbowL: 'forearm.L', wristL: 'hand.L',
   shoulderR: 'upper_arm.R', elbowR: 'forearm.R', wristR: 'hand.R', hipL: 'thigh.L', kneeL: 'shin.L', ankleL: 'foot.L', hipR: 'thigh.R', kneeR: 'shin.R', ankleR: 'foot.R' };
-function autoRig(src) {
+function autoRig(src, override, onlyJoints) {
   src.traverse((o) => o.isSkinnedMesh && o.skeleton.pose());
   src.updateMatrixWorld(true);
   const key = (n) => n.replace(/[.:\s]/g, ''); // the glTF loader strips dots from node names
@@ -462,6 +463,8 @@ function autoRig(src) {
     for (const [n, b] of Object.entries(BLENDER_BONES)) W[n] = old[key(b)].getWorldPosition(new THREE.Vector3());
     W.chest = W.spine.clone().lerp(W.neck, 0.5);
   }
+  if (override) for (const [n, v] of Object.entries(override)) W[n] = new THREE.Vector3(...v); // joints placed by hand
+  if (onlyJoints) return W;
   const bones = {}, list = [];
   for (const [n, par] of RIG) {
     const b = new THREE.Bone(); b.name = n;
@@ -497,6 +500,68 @@ function autoRig(src) {
   return out;
 }
 
+// ---------- manual rig editor (imported models) ----------
+// Drag the 17 Poseme joints onto the mesh, then the skin weights are rebuilt around them and saved with the model.
+let rigEdit = null;
+function placeRigHandles(W) {
+  for (const [n, h] of Object.entries(rigEdit.handles)) h.position.copy(W[n]);
+}
+async function startRigEdit(c) {
+  if (!IMPORTS[c.type]) return toast('Rig editing is for your imported models (My models)');
+  if (rigEdit) endRigEdit(true);
+  resetPose(c); applyStretch(c);
+  select(null);
+  c.group.updateMatrixWorld(true);
+  const root = c.group.children[0];
+  const toWorld = (W) => Object.fromEntries(RIG.map(([n]) => [n, root.localToWorld(W[n].clone())]));
+  const guess = toWorld(autoRig(IMPORTS[c.type].root, null, true));
+  const start = c.autoRig ? Object.fromEntries(RIG.map(([n]) => [n, c.joints[n].getWorldPosition(new THREE.Vector3())])) : guess;
+  const handles = {};
+  for (const [n, , , side] of RIG) {
+    const h = makeDot(side, n === 'hips' ? 0.05 : 0.04);
+    h.userData = { isDot: true, rigJoint: n };
+    scene.add(h); handles[n] = h;
+  }
+  c.dots.forEach((d) => (d.visible = false));
+  rigEdit = { c, root, handles, guess, mirror: true };
+  placeRigHandles(start);
+  renderPanel('rig');
+  toast('Drag the joints into place, then Apply');
+}
+tc.addEventListener('objectChange', () => {
+  const h = rigEdit?.active; if (!rigEdit?.mirror || !h || tc.object !== h) return;
+  const n = h.userData.rigJoint, twin = rigEdit.handles[swapSide(n)];
+  if (twin && twin !== h) { const cx = rigEdit.handles.hips.position.x; twin.position.set(2 * cx - h.position.x, h.position.y, h.position.z); }
+});
+function endRigEdit(cancel) {
+  if (!rigEdit) return;
+  tc.detach(); tc.setSpace('local');
+  Object.values(rigEdit.handles).forEach((h) => scene.remove(h));
+  rigEdit.c.dots.forEach((d) => (d.visible = showDots && !rigEdit.c.locked));
+  rigEdit = null;
+  P.style.display = 'none'; openPanel = null;
+  if (cancel) toast('Rig unchanged');
+}
+async function applyRigEdit() {
+  const { c, root, handles } = rigEdit, t = c.type;
+  const ov = Object.fromEntries(Object.entries(handles).map(([n, h]) => [n, root.worldToLocal(h.position.clone()).toArray()]));
+  toast('Rebuilding the rig…');
+  IMPORTS[t].root = autoRig(IMPORTS[t].root, ov);
+  IMPORTS[t].rig = ov;
+  try {
+    const rec = await idbDo('readonly', (st) => st.get(t));
+    if (rec) await idbDo('readwrite', (st) => st.put({ ...rec, rig: ov }, t));
+  } catch { /* not saved: the fix lasts this session */ }
+  endRigEdit();
+  pushUndo();
+  const pos = c.group.position.clone(), rot = c.group.quaternion.clone();
+  scene.remove(c.group); chars.splice(chars.indexOf(c), 1);
+  const n = await addCharacter(t);
+  n.group.position.copy(pos); n.group.quaternion.copy(rot);
+  select({ char: n });
+  toast('Rig applied and saved');
+}
+
 // ---------- thumbnails (cards in the Add panel) ----------
 let thumbR, thumbFx;
 async function makeThumb(type) {
@@ -518,6 +583,23 @@ async function makeThumb(type) {
   return thumbR.domElement.toDataURL('image/png');
 }
 
+// Outline only the big shapes. The inverted-hull outline draws a black ring around every mesh, so tiny inner
+// parts (eyes, teeth, lips, finger joints) and see-through layers turned into blobs and bands inside the body.
+function tuneOutline(c) {
+  c.group.updateMatrixWorld(true);
+  const H = new THREE.Box3().setFromObject(c.group, true).getSize(new THREE.Vector3()).y || 1.75;
+  const sphere = new THREE.Sphere(), ws = new THREE.Vector3();
+  c.group.traverse((o) => {
+    if (!o.isMesh || o.userData.isDot || !o.material) return;
+    if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+    sphere.copy(o.geometry.boundingSphere); o.getWorldScale(ws);
+    const r = sphere.radius * Math.max(ws.x, ws.y, ws.z);
+    const tiny = !o.userData.limb && r < 0.04 * H; // limb tubes rebuild every frame, keep them outlined
+    // rig characters share one material across parts, so a tiny part gets its own copy before switching off
+    if (tiny || o.material.transparent) { o.material = o.material.clone(); o.material.userData.outlineParameters = { visible: false }; }
+  });
+}
+
 // ---------- 2D cel shading (flat colour + one hard shadow band) ----------
 let cel = false;
 const toonRamp = new THREE.DataTexture(new Uint8Array([140, 140, 140, 255, 255, 255, 255, 255]), 2, 1);
@@ -528,6 +610,7 @@ function setCel(c, on) {
     if (on) {
       const pbr = (o.userData.pbrMat ??= o.material);
       o.material = new THREE.MeshToonMaterial({ color: pbr.color, map: pbr.map ?? null, gradientMap: toonRamp });
+      o.material.userData.outlineParameters = pbr.userData.outlineParameters;
       o.receiveShadow = false; // self-shadowing speckles the flat bands; keep the cast shadow on the floor
     } else if (o.userData.pbrMat) { o.material = o.userData.pbrMat; delete o.userData.pbrMat; o.receiveShadow = true; }
   });
@@ -541,6 +624,7 @@ let showDots = true;
 
 async function addCharacter(type, state) {
   const c = STYLES[type] ? buildRig(type) : await buildGltf(type);
+  tuneOutline(c);
   if (cel) setCel(c, true);
   scene.add(c.group);
   chars.push(c);
@@ -657,6 +741,11 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   down = null;
   ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
+  if (rigEdit) { // while editing a rig only the joint handles are tappable
+    const h = raycaster.intersectObjects(Object.values(rigEdit.handles), false)[0];
+    if (h) { tc.setMode('translate'); tc.setSpace('world'); tc.attach(h.object); rigEdit.active = h.object; }
+    return;
+  }
   const live = chars.filter((c) => !c.locked);
   const dots = live.flatMap((c) => c.dots.filter((d) => d.visible));
   let hit = raycaster.intersectObjects(dots, false)[0];
@@ -786,12 +875,18 @@ const PANELS = {
   },
   face: () => { const c = charOf(); return !c?.style?.face ? ['This character has no face to change'] : [row(...EXPRESSIONS.map((e) => btn(e, () => { pushUndo(); c.expr = e; drawFace(c); renderPanel('face'); }, c.expr === e)))]; },
   hands: () => { const c = charOf(); return !c?.fingers?.[1]?.length ? ['This character has no posable fingers'] : [row(...['open', 'relaxed', 'fist', 'point', 'peace', 'thumbsup'].map((h) => btn(h, () => { pushUndo(); setHand(c, h); renderPanel('hands'); }, c.hand === h)))]; },
+  rig: () => !rigEdit ? ['Select an imported model, then tap 🦴'] : [
+    'Drag each joint dot onto the matching spot of the body (shoulders, elbows, wrists, hips, knees, ankles, neck, head). Turn the camera to check from the side.',
+    row(btn('Mirror left ↔ right', () => { rigEdit.mirror = !rigEdit.mirror; renderPanel('rig'); }, rigEdit.mirror),
+      btn('Auto-fit again', () => placeRigHandles(rigEdit.guess))),
+    row(btn('✓ Apply rig', applyRigEdit), btn('Cancel', () => endRigEdit(true))),
+  ],
   color: () => {
     if (sel?.prop) return [swatches('#' + sel.prop.material.color.getHexString(), (col) => sel.prop.material.color.set(col))];
     const c = charOf(); return c ? [swatches(c.color, (col) => { c.color = col; tint(c); })] : [];
   },
 };
-const TITLES = { add: 'Add', poses: 'Poses', bg: 'Background', light: 'Light', camera: 'Camera', squash: 'Squash, stretch & rubber hose', face: 'Expression', hands: 'Hands', color: 'Color' };
+const TITLES = { add: 'Add', poses: 'Poses', bg: 'Background', light: 'Light', camera: 'Camera', squash: 'Squash, stretch & rubber hose', face: 'Expression', hands: 'Hands', color: 'Color', rig: 'Edit rig' };
 function renderPanel(name) {
   openPanel = name;
   P.innerHTML = '';
@@ -837,6 +932,7 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.style.displa
 
 // ---------- toolbar wiring ----------
 const ACTS = {
+  rig: () => (sel?.char ? startRigEdit(sel.char) : toast('Select a character first')),
   cel: () => toggleCel(),
   shot: screenshot, undo, redo, mode: cycleMode,
   save: () => { const saved = JSON.parse(safeGet('poseme.saves') || '[]'); saved.unshift({ name: 'Quick ' + new Date().toLocaleString(), st: sceneState() }); safeSet('poseme.saves', JSON.stringify(saved.slice(0, 30))); toast('Scene saved'); },
@@ -867,7 +963,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // test hook for automated checks
-window.poseme = { chars, props, addCharacter, applyPreset, mirror, select, sceneState, loadScene, undo, applyStretch, setHand, drawFace, renderPanel, scene, camera, orbit, THREE, IMPORTS, importModel, makeThumb, STYLES, MODELS };
+window.poseme = { chars, props, addCharacter, applyPreset, mirror, select, sceneState, loadScene, undo, applyStretch, setHand, drawFace, renderPanel, scene, camera, orbit, THREE, IMPORTS, importModel, makeThumb, STYLES, MODELS, startRigEdit, applyRigEdit, rigState: () => rigEdit, tc };
 
 await addCharacter('poseme');
 $('#loading').remove();
