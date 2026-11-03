@@ -433,12 +433,61 @@ async function importModel(file, id, thumb, rig) {
 // Blender/Rigify-style bone names (used by Android-3D-Model-Forge and many hand-made rigs) -> Poseme joints
 const BLENDER_BONES = { hips: 'pelvis', spine: 'spine', neck: 'neck', head: 'head', shoulderL: 'upper_arm.L', elbowL: 'forearm.L', wristL: 'hand.L',
   shoulderR: 'upper_arm.R', elbowR: 'forearm.R', wristR: 'hand.R', hipL: 'thigh.L', kneeL: 'shin.L', ankleL: 'foot.L', hipR: 'thigh.R', kneeR: 'shin.R', ankleR: 'foot.R' };
-function autoRig(src, override, onlyJoints) {
+// Fit the 17 Poseme joints to the mesh. mode: 'auto' (read arms from the mesh), 'T' (arms out), 'A' (arms ~45° down).
+function fitJoints(pts, box, mode = 'auto') {
+  const V = THREE.Vector3, h = box.max.y - box.min.y, Y = (f) => box.min.y + f * h;
+  const cx = (box.min.x + box.max.x) / 2, cz = (box.min.z + box.max.z) / 2, W = {};
+  // body width per height slice (ignores far-out arms) -> neck = narrowest slice under the head
+  const N = 80, hw = new Float32Array(N);
+  for (const p of pts) { const i = Math.floor(((p.y - box.min.y) / h) * N), d = Math.abs(p.x - cx); if (i >= 0 && i < N && d < 0.3 * h && d > hw[i]) hw[i] = d; }
+  const slice = (y) => hw[Math.min(N - 1, Math.max(0, Math.floor(((y - box.min.y) / h) * N)))];
+  let ni = Math.round(0.8 * N);
+  for (let i = Math.round(0.5 * N); i < Math.round(0.93 * N); i++) if (hw[i] > 0 && hw[i] < hw[ni]) ni = i;
+  const neckY = Y((ni + 0.5) / N);
+  // feet -> ankles
+  for (const sd of [1, -1]) {
+    const f = pts.filter((p) => p.y < Y(0.07) && sd * (p.x - cx) > 0);
+    const c = f.length ? f.reduce((a, p) => a.add(p), new V()).divideScalar(f.length) : new V(cx + sd * 0.07 * h, 0, cz);
+    W['ankle' + (sd > 0 ? 'L' : 'R')] = new V(c.x, Y(0.05), c.z - 0.02 * h);
+  }
+  // crotch = lowest body point on the centre line above the knees
+  let crotch = Infinity;
+  for (const p of pts) if (Math.abs(p.x - cx) < 0.02 * h && p.y > Y(0.3) && p.y < Y(0.7)) crotch = Math.min(crotch, p.y);
+  if (crotch === Infinity) crotch = Y(0.47);
+  const hipY = Math.min(crotch + 0.04 * h, neckY - 0.15 * h);
+  W.hips = new V(cx, hipY, cz);
+  W.neck = new V(cx, neckY - 0.02 * h, cz);
+  W.head = new V(cx, neckY + 0.025 * h, cz);
+  W.spine = W.hips.clone().lerp(W.neck, 0.3);
+  W.chest = W.hips.clone().lerp(W.neck, 0.65);
+  const shX = Math.min(0.2 * h, Math.max(0.05 * h, slice(neckY - 0.1 * h) * 0.95)), shY = neckY - 0.035 * h;
+  for (const sd of [1, -1]) {
+    const S = sd > 0 ? 'L' : 'R';
+    W['hip' + S] = new V(cx + sd * Math.max(0.04 * h, Math.abs(W['ankle' + S].x - cx) * 0.6), hipY - 0.02 * h, cz);
+    W['knee' + S] = W['hip' + S].clone().lerp(W['ankle' + S], 0.5).add(new V(0, 0, 0.01 * h));
+    const sh = (W['shoulder' + S] = new V(cx + sd * shX, shY, cz));
+    // hand tip = the point farthest from the shoulder on this side, below shoulder height
+    // hand tip = average of the farthest 5% of arm-side points (one stray corner skews the arm angle)
+    const cand = pts.filter((p) => sd * (p.x - cx) >= shX * 0.9 && p.y <= shY + 0.08 * h && p.y >= Y(0.2)).map((p) => [p, p.distanceTo(sh)]).sort((x, y) => y[1] - x[1]);
+    const far = cand.slice(0, Math.max(1, Math.ceil(cand.length * 0.05)));
+    const tip = cand.length ? far.reduce((acc, [p]) => acc.add(p), new V()).divideScalar(far.length) : null;
+    const len = tip ? cand[0][1] * 0.86 : 0.3 * h;
+    const dir = mode === 'T' ? new V(sd, 0, 0) : mode === 'A' ? new V(sd * Math.SQRT1_2, -Math.SQRT1_2, 0) : tip ? tip.clone().sub(sh).normalize() : new V(sd, 0, 0);
+    W['wrist' + S] = sh.clone().addScaledVector(dir, len);
+    W['elbow' + S] = sh.clone().lerp(W['wrist' + S], 0.5).add(new V(0, 0, -0.01 * h));
+  }
+  return W;
+}
+
+// Build a 17-bone skeleton on the joints and skin the mesh to it.
+// Bones are oriented so arms point along ±X and legs along -Y in the zero pose ("virtual T-pose"):
+// an A-pose model's rest is then a rotation of that, and presets / mirror behave like on T-pose models.
+function autoRig(src, override, onlyJoints, mode) {
   src.traverse((o) => o.isSkinnedMesh && o.skeleton.pose());
   src.updateMatrixWorld(true);
   const key = (n) => n.replace(/[.:\s]/g, ''); // the glTF loader strips dots from node names
   const old = {}; src.traverse((o) => { if (o.isBone) old[key(o.name)] = o; });
-  const useOld = Object.values(BLENDER_BONES).every((n) => old[key(n)]);
+  const useOld = !mode && Object.values(BLENDER_BONES).every((n) => old[key(n)]);
   const parts = [];
   src.traverse((o) => {
     if (!o.isMesh) return;
@@ -448,54 +497,80 @@ function autoRig(src, override, onlyJoints) {
   if (!parts.length) throw new Error('no meshes in the file');
   const box = new THREE.Box3();
   for (const [g] of parts) { g.computeBoundingBox(); box.union(g.boundingBox); }
-  const h = box.max.y - box.min.y, half = (box.max.x - box.min.x) / 2, s = h / 2.0;
-  const cx = (box.min.x + box.max.x) / 2, cz = (box.min.z + box.max.z) / 2, tpose = half * 2 > 0.6 * h;
-  const tw = {}, W = {};
-  for (const [n, par, off] of RIG) tw[n] = (par ? tw[par].clone() : new THREE.Vector3(0, 0.95, 0)).add(new THREE.Vector3(...off));
-  for (const [n, , , side] of RIG) {
-    const p = tw[n]; let x = p.x * s, y = box.min.y + p.y * s;
-    const arm = /^(shoulder|elbow|wrist)/.exec(n)?.[1];
-    if (arm && tpose) x = side * { shoulder: 0.12 * s, elbow: 0.12 * s + (half * 0.9 - 0.12 * s) * 0.52, wrist: half * 0.9 }[arm];
-    else if (arm) { x = side * 0.17 * s; y = box.min.y + tw.shoulderL.y * s - { shoulder: 0, elbow: 0.27, wrist: 0.52 }[arm] * s; }
-    W[n] = new THREE.Vector3(cx + x, y, cz);
-  }
+  const total = parts.reduce((n, [g]) => n + g.attributes.position.count, 0), step = Math.max(1, Math.floor(total / 30000)), pts = [];
+  for (const [g] of parts) { const pos = g.attributes.position; for (let i = 0; i < pos.count; i += step) pts.push(new THREE.Vector3().fromBufferAttribute(pos, i)); }
+  let W = fitJoints(pts, box, mode);
   if (useOld) { // keep the model's own joint placement, only the skin weights are rebuilt
     for (const [n, b] of Object.entries(BLENDER_BONES)) W[n] = old[key(b)].getWorldPosition(new THREE.Vector3());
     W.chest = W.spine.clone().lerp(W.neck, 0.5);
   }
   if (override) for (const [n, v] of Object.entries(override)) W[n] = new THREE.Vector3(...v); // joints placed by hand
   if (onlyJoints) return W;
+  const h = box.max.y - box.min.y, cx = W.hips.x, shX = Math.abs(W.shoulderL.x - cx);
+  // bone world orientations
+  const V = THREE.Vector3, child = { shoulderL: 'elbowL', elbowL: 'wristL', shoulderR: 'elbowR', elbowR: 'wristR', hipL: 'kneeL', kneeL: 'ankleL', hipR: 'kneeR', kneeR: 'ankleR' };
+  const axis = (n) => (/L$/.test(n) && /shoulder|elbow/.test(n) ? new V(1, 0, 0) : /R$/.test(n) && /shoulder|elbow/.test(n) ? new V(-1, 0, 0) : /^(hip|knee)[LR]$/.test(n) ? new V(0, -1, 0) : null);
+  const Qw = {};
+  for (const [n, par] of RIG) {
+    const ax = axis(n);
+    Qw[n] = ax ? new THREE.Quaternion().setFromUnitVectors(ax, W[child[n]].clone().sub(W[n]).normalize())
+      : /^(wrist|ankle)/.test(n) ? Qw[par].clone() : new THREE.Quaternion();
+  }
   const bones = {}, list = [];
   for (const [n, par] of RIG) {
     const b = new THREE.Bone(); b.name = n;
-    b.position.copy(W[n]).sub(par ? W[par] : new THREE.Vector3());
+    const inv = par ? Qw[par].clone().invert() : new THREE.Quaternion();
+    b.position.copy(W[n]).sub(par ? W[par] : new V()).applyQuaternion(inv);
+    b.quaternion.copy(inv).multiply(Qw[n]);
     if (par) bones[par].add(b);
     bones[n] = b; list.push(b);
   }
-  // each segment belongs to the bone it starts at; leaf bones get a short segment past their end
-  const segs = [];
-  for (const [n, par] of RIG) if (par) segs.push([list.findIndex((b) => b.name === par), W[par], W[n]]);
-  const leaf = { head: [0, (box.max.y - W.head.y) / s, 0], wristL: [0.12, 0, 0], wristR: [-0.12, 0, 0], ankleL: [0, -0.04, 0.1], ankleR: [0, -0.04, 0.1] };
-  for (const [n, d] of Object.entries(leaf)) segs.push([list.findIndex((b) => b.name === n), W[n], W[n].clone().add(new THREE.Vector3(...d).multiplyScalar(s))]);
-  const seg = new THREE.Line3(), v = new THREE.Vector3(), q = new THREE.Vector3();
+  // segments: each belongs to the bone it starts at; leaf bones get a short segment past their end
+  const bi = (n) => list.findIndex((b) => b.name === n), segs = [];
+  for (const [n, par] of RIG) if (par) segs.push([bi(par), W[par], W[n]]);
+  const ext = (n, from, k) => W[n].clone().add(W[n].clone().sub(W[from]).normalize().multiplyScalar(k * h));
+  segs.push([bi('head'), W.head, new V(W.head.x, box.max.y, W.head.z)]);
+  for (const S of ['L', 'R']) { segs.push([bi('wrist' + S), W['wrist' + S], ext('wrist' + S, 'elbow' + S, 0.08)]); segs.push([bi('ankle' + S), W['ankle' + S], W['ankle' + S].clone().add(new V(0, -0.04 * h, 0.08 * h))]); }
+  // a vertex may only use limbs on its own side, and arms only away from the centre line
+  const sideOf = list.map((b) => (/L$/.test(b.name) ? 1 : /R$/.test(b.name) ? -1 : 0)), armOf = list.map((b) => /^(shoulder|elbow|wrist)/.test(b.name));
+  const allowed = (k, x) => !sideOf[k] || (sideOf[k] * (x - cx) > (armOf[k] ? shX * 0.45 : -0.01 * h));
+  const seg = new THREE.Line3(), v = new V(), q = new V(), NB = list.length;
   const out = new THREE.Group(); out.add(bones.hips); out.updateMatrixWorld(true);
   const skel = new THREE.Skeleton(list);
-  for (const [g, mat] of parts) {
-    const pos = g.attributes.position, n = pos.count, si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+  // pass 1: raw nearest-segment distances, and each bone's typical thickness (envelope radius)
+  const D = parts.map(([g]) => new Float32Array(g.attributes.position.count * NB).fill(Infinity));
+  const near = list.map(() => []);
+  parts.forEach(([g], pi) => {
+    const pos = g.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i); let bk = -1, bd = Infinity;
+      for (const [k, a, b] of segs) {
+        if (!allowed(k, v.x)) continue;
+        seg.set(a, b); seg.closestPointToPoint(v, true, q); const d = q.distanceTo(v);
+        if (d < D[pi][i * NB + k]) D[pi][i * NB + k] = d;
+        if (d < bd) { bd = d; bk = k; }
+      }
+      if (bk >= 0 && i % 4 === 0) near[bk].push(bd);
+    }
+  });
+  const rad = near.map((a) => { if (!a.length) return 0.05 * h; a.sort((x, y) => x - y); return Math.max(0.015 * h, a[a.length >> 1]); });
+  // pass 2: distance in units of bone thickness, smooth blend of the 3 best bones
+  parts.forEach(([g, mat], pi) => {
+    const n = g.attributes.position.count, si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
     for (let i = 0; i < n; i++) {
-      v.fromBufferAttribute(pos, i);
-      const best = new Map();
-      for (const [bi, a, b] of segs) { seg.set(a, b); seg.closestPointToPoint(v, true, q); const d = q.distanceTo(v); if (!(best.get(bi) <= d)) best.set(bi, d); }
-      const top = [...best].sort((x, y) => x[1] - y[1]).slice(0, 2);
-      const w = top.map(([, d]) => 1 / (d ** 4 + 1e-9)), sum = w[0] + (w[1] || 0);
-      top.forEach(([bi], k) => { si[i * 4 + k] = bi; sw[i * 4 + k] = w[k] / sum; });
+      const top = [];
+      for (let k = 0; k < NB; k++) { const d = D[pi][i * NB + k]; if (d < Infinity) top.push([k, d / rad[k]]); }
+      top.sort((x, y) => x[1] - y[1]); top.length = Math.min(3, top.length);
+      if (!top.length) { si[i * 4] = 0; sw[i * 4] = 1; continue; }
+      const w = top.map(([, dn]) => 1 / (dn ** 6 + 1e-6)), sum = w.reduce((a, x) => a + x, 0);
+      top.forEach(([k], j) => { si[i * 4 + j] = k; sw[i * 4 + j] = w[j] / sum; });
     }
     g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
     g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
     if (!g.attributes.normal) g.computeVertexNormals();
     const m = new THREE.SkinnedMesh(g, mat ?? new THREE.MeshStandardMaterial({ color: 0xdddddd }));
     out.add(m); m.bind(skel);
-  }
+  });
   out.userData.autoRig = true;
   return out;
 }
@@ -514,25 +589,50 @@ async function startRigEdit(c) {
   c.group.updateMatrixWorld(true);
   const root = c.group.children[0];
   const toWorld = (W) => Object.fromEntries(RIG.map(([n]) => [n, root.localToWorld(W[n].clone())]));
-  const guess = toWorld(autoRig(IMPORTS[c.type].root, null, true));
+  const fit = (mode) => toWorld(autoRig(IMPORTS[c.type].root, null, true, mode));
+  const guess = fit('auto');
   const start = c.autoRig ? Object.fromEntries(RIG.map(([n]) => [n, c.joints[n].getWorldPosition(new THREE.Vector3())])) : guess;
   const handles = {};
   for (const [n, , , side] of RIG) {
     const h = makeDot(side, n === 'hips' ? 0.05 : 0.04);
-    h.userData = { isDot: true, rigJoint: n };
+    h.userData = { isDot: true, rigJoint: n, size: h.scale.x };
     scene.add(h); handles[n] = h;
   }
   c.dots.forEach((d) => (d.visible = false));
-  rigEdit = { c, root, handles, guess, mirror: true };
+  rigEdit = { c, root, handles, guess, fit, mirror: true };
   placeRigHandles(start);
   renderPanel('rig');
   toast('Drag the joints into place, then Apply');
 }
-tc.addEventListener('objectChange', () => {
-  const h = rigEdit?.active; if (!rigEdit?.mirror || !h || tc.object !== h) return;
-  const n = h.userData.rigJoint, twin = rigEdit.handles[swapSide(n)];
-  if (twin && twin !== h) { const cx = rigEdit.handles.hips.position.x; twin.position.set(2 * cx - h.position.x, h.position.y, h.position.z); }
-});
+// Drag joints straight with a finger on a plane facing the camera (no gizmo: the move gizmo jumped on touch).
+// Capture phase on the document runs before the camera controls, so a joint drag never also turns the camera.
+const dragPlane = new THREE.Plane(), dragHit = new THREE.Vector3();
+const rayAt = (e) => { ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); raycaster.setFromCamera(ndc, camera); };
+document.addEventListener('pointerdown', (e) => {
+  if (!rigEdit || e.target !== renderer.domElement) return;
+  rayAt(e);
+  const hit = raycaster.intersectObjects(Object.values(rigEdit.handles), false)[0];
+  if (!hit) return; // empty space: let the camera turn
+  e.stopPropagation(); e.preventDefault();
+  const h = hit.object;
+  dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), h.position);
+  rigEdit.drag = { h, id: e.pointerId };
+  Object.values(rigEdit.handles).forEach((x) => x.scale.setScalar(x.userData.size));
+  h.scale.setScalar(h.userData.size * 1.6);
+}, true);
+document.addEventListener('pointermove', (e) => {
+  const d = rigEdit?.drag; if (!d || e.pointerId !== d.id) return;
+  e.stopPropagation(); rayAt(e);
+  if (!raycaster.ray.intersectPlane(dragPlane, dragHit)) return;
+  const n = d.h.userData.rigJoint, cx = rigEdit.handles.hips.position.x;
+  d.h.position.copy(dragHit);
+  if (rigEdit.mirror) {
+    const twin = rigEdit.handles[swapSide(n)];
+    if (twin !== d.h) twin.position.set(2 * cx - dragHit.x, dragHit.y, dragHit.z);
+    else if (n !== 'hips') d.h.position.x = cx; // centre joints stay on the centre line
+  }
+}, true);
+document.addEventListener('pointerup', (e) => { if (rigEdit?.drag && e.pointerId === rigEdit.drag.id) { e.stopPropagation(); rigEdit.drag = null; } }, true);
 function endRigEdit(cancel) {
   if (!rigEdit) return;
   tc.detach(); tc.setSpace('local');
@@ -741,11 +841,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   down = null;
   ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  if (rigEdit) { // while editing a rig only the joint handles are tappable
-    const h = raycaster.intersectObjects(Object.values(rigEdit.handles), false)[0];
-    if (h) { tc.setMode('translate'); tc.setSpace('world'); tc.attach(h.object); rigEdit.active = h.object; }
-    return;
-  }
+  if (rigEdit) return; // joints are dragged directly while editing a rig
   const live = chars.filter((c) => !c.locked);
   const dots = live.flatMap((c) => c.dots.filter((d) => d.visible));
   let hit = raycaster.intersectObjects(dots, false)[0];
@@ -876,9 +972,10 @@ const PANELS = {
   face: () => { const c = charOf(); return !c?.style?.face ? ['This character has no face to change'] : [row(...EXPRESSIONS.map((e) => btn(e, () => { pushUndo(); c.expr = e; drawFace(c); renderPanel('face'); }, c.expr === e)))]; },
   hands: () => { const c = charOf(); return !c?.fingers?.[1]?.length ? ['This character has no posable fingers'] : [row(...['open', 'relaxed', 'fist', 'point', 'peace', 'thumbsup'].map((h) => btn(h, () => { pushUndo(); setHand(c, h); renderPanel('hands'); }, c.hand === h)))]; },
   rig: () => !rigEdit ? ['Select an imported model, then tap 🦴'] : [
-    'Drag each joint dot onto the matching spot of the body (shoulders, elbows, wrists, hips, knees, ankles, neck, head). Turn the camera to check from the side.',
-    row(btn('Mirror left ↔ right', () => { rigEdit.mirror = !rigEdit.mirror; renderPanel('rig'); }, rigEdit.mirror),
-      btn('Auto-fit again', () => placeRigHandles(rigEdit.guess))),
+    'Drag each dot with your finger onto the matching joint (shoulders, elbows, wrists, hips, knees, ankles, neck, head). Drag empty space to turn the camera and check from the side.',
+    'Fit the joints to the pose your model stands in:',
+    row(btn('Auto-detect', () => placeRigHandles(rigEdit.guess)), btn('T-pose', () => placeRigHandles(rigEdit.fit('T'))), btn('A-pose', () => placeRigHandles(rigEdit.fit('A')))),
+    row(btn('Mirror left ↔ right', () => { rigEdit.mirror = !rigEdit.mirror; renderPanel('rig'); }, rigEdit.mirror)),
     row(btn('✓ Apply rig', applyRigEdit), btn('Cancel', () => endRigEdit(true))),
   ],
   color: () => {
