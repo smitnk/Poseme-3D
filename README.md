@@ -14,7 +14,8 @@ A PoseMyArt-style 3D posing app for Android, starring the character from the Pos
 - **Chibi Girl** from the clay render (img2threejs), with flared legs and block boots.
 - **Import your own models**: FBX, GLB/GLTF (single file) and OBJ. Rigged models keep their bones; models without bones get an automatic Poseme rig (T-pose works best), so presets and mirror work on them.
 - **Rig engine**: joints are read from the mesh shape (feet, crotch, neck, hand tips), so T-pose, A-pose and arms-down models rig correctly; skin weights are scaled by each bone's thickness and kept to the correct side. A-pose models are stored with an arms-out zero pose, so presets and mirror work like on T-pose models.
-- **Manual rig editor** (🦴 on a selected imported model): drag joints with a finger (mirrored left/right by default), Auto-detect / T-pose / A-pose fit buttons, Apply rebuilds the skin and saves the rig with the model.
+- **Skeleton editor, Rigify-style** (🦴 on a selected imported model): metarig templates (Basic 17 bones, Human + fingers and toes, + Tail), fitted to the mesh by Auto-detect / T-pose / A-pose; finger-drag joints with bone lines shown; Extrude bone and Delete bone (mirrored); Generate rig skins the mesh to any skeleton and saves it with the model.
+- **IK limbs** (🎯): drag a hand or foot and the arm or leg bends to follow (two-bone IK, keeps the elbow/knee bend direction).
 - **2D cel shading** (◐ button or Light panel): flat colour with one hard shadow band, for 2D animation reference.
 - **Android-3D-Model-Forge characters**: Clay Chibi, Forge Kid, Gorilla, Round Buddy, Snow Buddy (from smitnk/Android-3D-Model-Forge), re-skinned with smooth weights on their own joints.
 - **Add panel picture cards**, and imported models are saved on the phone (My models; ✕ removes one).
