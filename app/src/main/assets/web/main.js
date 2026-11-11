@@ -433,6 +433,24 @@ async function importModel(file, id, thumb, rig) {
 // Blender/Rigify-style bone names (used by Android-3D-Model-Forge and many hand-made rigs) -> Poseme joints
 const BLENDER_BONES = { hips: 'pelvis', spine: 'spine', neck: 'neck', head: 'head', shoulderL: 'upper_arm.L', elbowL: 'forearm.L', wristL: 'hand.L',
   shoulderR: 'upper_arm.R', elbowR: 'forearm.R', wristR: 'hand.R', hipL: 'thigh.L', kneeL: 'shin.L', ankleL: 'foot.L', hipR: 'thigh.R', kneeR: 'shin.R', ankleR: 'foot.R' };
+// Joint from the mesh: along a->b, the slice with the thinnest cross-section (mean distance of `pts` from the axis)
+// within 30%-75% of the way is the knee/elbow. Falls back to `fallback` when no slice is clearly thinner than its neighbours.
+// shortcut: a limb pressed against the torso/other limb in `pts` inflates the radius; callers pre-filter by side.
+function thinnestSlice(pts, a, b, fallback) {
+  const N = 24, ax = b.clone().sub(a), L = ax.length(), u = ax.divideScalar(L || 1), sum = new Float64Array(N), cnt = new Uint32Array(N), r = new THREE.Vector3();
+  for (const p of pts) {
+    r.copy(p).sub(a); const t = r.dot(u) / L;
+    if (t < 0 || t >= 1) continue;
+    const i = Math.floor(t * N); sum[i] += r.addScaledVector(u, -t * L).length(); cnt[i]++;
+  }
+  const rad = (i) => (i >= 0 && i < N && cnt[i] ? sum[i] / cnt[i] : null);
+  let best = -1;
+  for (let i = Math.ceil(0.3 * N - 0.5); i <= Math.floor(0.75 * N - 0.5); i++) if (rad(i) !== null && (best < 0 || rad(i) < rad(best))) best = i;
+  if (best < 0) return fallback;
+  const lo = rad(best - 1), hi = rad(best + 1), m = rad(best);
+  return (lo === null || lo > m * 1.05) && (hi === null || hi > m * 1.05) && (lo !== null || hi !== null) ? a.clone().lerp(b, (best + 0.5) / N) : fallback;
+}
+
 // Fit the 17 Poseme joints to the mesh. mode: 'auto' (read arms from the mesh), 'T' (arms out), 'A' (arms ~45° down).
 function fitJoints(pts, box, mode = 'auto') {
   const V = THREE.Vector3, h = box.max.y - box.min.y, Y = (f) => box.min.y + f * h;
@@ -464,7 +482,8 @@ function fitJoints(pts, box, mode = 'auto') {
   for (const sd of [1, -1]) {
     const S = sd > 0 ? 'L' : 'R';
     W['hip' + S] = new V(cx + sd * Math.max(0.04 * h, Math.abs(W['ankle' + S].x - cx) * 0.6), hipY - 0.02 * h, cz);
-    W['knee' + S] = W['hip' + S].clone().lerp(W['ankle' + S], 0.5).add(new V(0, 0, 0.01 * h));
+    const legMid = W['hip' + S].clone().lerp(W['ankle' + S], 0.5);
+    W['knee' + S] = thinnestSlice(pts.filter((p) => sd * (p.x - cx) > 0 && p.y < W['hip' + S].y), W['hip' + S], W['ankle' + S], legMid).add(new V(0, 0, 0.01 * h));
     const sh = (W['shoulder' + S] = new V(cx + sd * shX, shY, cz));
     // hand tip = the point farthest from the shoulder on this side, below shoulder height
     // hand tip = average of the farthest 5% of arm-side points (one stray corner skews the arm angle)
@@ -474,9 +493,46 @@ function fitJoints(pts, box, mode = 'auto') {
     const len = tip ? cand[0][1] * 0.86 : 0.3 * h;
     const dir = mode === 'T' ? new V(sd, 0, 0) : mode === 'A' ? new V(sd * Math.SQRT1_2, -Math.SQRT1_2, 0) : tip ? tip.clone().sub(sh).normalize() : new V(sd, 0, 0);
     W['wrist' + S] = sh.clone().addScaledVector(dir, len);
-    W['elbow' + S] = sh.clone().lerp(W['wrist' + S], 0.5).add(new V(0, 0, -0.01 * h));
+    const armMid = sh.clone().lerp(W['wrist' + S], 0.5);
+    W['elbow' + S] = thinnestSlice(pts.filter((p) => sd * (p.x - cx) >= shX * 0.9), sh, W['wrist' + S], armMid).add(new V(0, 0, -0.01 * h));
   }
   return W;
+}
+
+// Jacobi Laplacian smoothing of per-vertex weights w (n*NB) over the surface: w_i = 0.5*w_i + 0.5*mean(w_nbrs).
+// Coincident vertices (UV/normal seams, non-indexed meshes) are welded by position so neighbours connect.
+// D (same layout as w) marks bones forbidden for a vertex with Infinity; they stay 0. Returns the smoothed array (rows sum to 1).
+function smoothSkinWeights(w, pos, index, NB, D, iters) {
+  const n = pos.count, canon = new Uint32Array(n), seen = new Map(), lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < n; i++) { const c = [pos.getX(i), pos.getY(i), pos.getZ(i)]; for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], c[k]); hi[k] = Math.max(hi[k], c[k]); } }
+  const cell = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 1e-5 || 1; // weld tolerance 1e-5 of the bbox size
+  for (let i = 0; i < n; i++) {
+    const key = (Math.round((pos.getX(i) - lo[0]) / cell) * 100003 + Math.round((pos.getY(i) - lo[1]) / cell)) * 100003 + Math.round((pos.getZ(i) - lo[2]) / cell);
+    let c = seen.get(key); if (c === undefined) seen.set(key, (c = i)); canon[i] = c;
+  }
+  const nt = index ? index.length : n, ix = (j) => (index ? index[j] : j), off = new Uint32Array(n + 1);
+  const edges = (f) => { for (let j = 0; j + 2 < nt; j += 3) { const a = canon[ix(j)], b = canon[ix(j + 1)], c = canon[ix(j + 2)]; if (a !== b) f(a, b); if (b !== c) f(b, c); if (c !== a) f(c, a); } };
+  edges((a, b) => { off[a + 1]++; off[b + 1]++; });
+  for (let i = 0; i < n; i++) off[i + 1] += off[i];
+  const nb = new Uint32Array(off[n]), cur = off.slice(0, n);
+  edges((a, b) => { nb[cur[a]++] = b; nb[cur[b]++] = a; });
+  let a = w, b = new Float32Array(w.length);
+  for (let it = 0; it < iters; it++) {
+    for (let i = 0; i < n; i++) {
+      if (canon[i] !== i) continue;
+      const o = i * NB, d = off[i + 1] - off[i]; let sum = 0;
+      for (let k = 0; k < NB; k++) b[o + k] = 0;
+      for (let e = off[i]; e < off[i + 1]; e++) { const m = nb[e] * NB; for (let k = 0; k < NB; k++) b[o + k] += a[m + k]; }
+      for (let k = 0; k < NB; k++) {
+        const x = D && D[o + k] === Infinity ? 0 : d ? 0.5 * a[o + k] + (0.5 * b[o + k]) / d : a[o + k];
+        b[o + k] = x; sum += x;
+      }
+      if (sum > 0) for (let k = 0; k < NB; k++) b[o + k] /= sum; else b[o] = 1; // nothing allowed -> hips
+    }
+    [a, b] = [b, a];
+  }
+  for (let i = 0; i < n; i++) if (canon[i] !== i) for (let k = 0; k < NB; k++) a[i * NB + k] = a[canon[i] * NB + k];
+  return a;
 }
 
 // Build a 17-bone skeleton on the joints and skin the mesh to it.
@@ -564,16 +620,25 @@ function autoRig(src, override, onlyJoints, mode) {
     }
   });
   const rad = near.map((a) => { if (!a.length) return 0.05 * h; a.sort((x, y) => x - y); return Math.max(0.015 * h, a[a.length >> 1]); });
-  // pass 2: distance in units of bone thickness, smooth blend of the 3 best bones
+  // pass 2: distance in units of bone thickness, soft blend of the 4 best bones, then smoothed over the surface
   parts.forEach(([g, mat], pi) => {
-    const n = g.attributes.position.count, si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+    const n = g.attributes.position.count, si = new Uint16Array(n * 4), sw = new Float32Array(n * 4), w0 = new Float32Array(n * NB);
     for (let i = 0; i < n; i++) {
       const top = [];
       for (let k = 0; k < NB; k++) { const d = D[pi][i * NB + k]; if (d < Infinity) top.push([k, d / rad[k]]); }
-      top.sort((x, y) => x[1] - y[1]); top.length = Math.min(3, top.length);
-      if (!top.length) { si[i * 4] = 0; sw[i * 4] = 1; continue; }
-      const w = top.map(([, dn]) => 1 / (dn ** 6 + 1e-6)), sum = w.reduce((a, x) => a + x, 0);
-      top.forEach(([k], j) => { si[i * 4 + j] = k; sw[i * 4 + j] = w[j] / sum; });
+      top.sort((x, y) => x[1] - y[1]); top.length = Math.min(4, top.length);
+      if (!top.length) { w0[i * NB] = 1; continue; }
+      const w = top.map(([, dn]) => 1 / (dn ** 2 + 1e-6)), sum = w.reduce((a, x) => a + x, 0);
+      top.forEach(([k], j) => { w0[i * NB + k] = w[j] / sum; });
+    }
+    const ws = smoothSkinWeights(w0, g.attributes.position, g.index?.array, NB, D[pi], 10);
+    for (let i = 0; i < n; i++) { // keep the 4 largest, renormalised
+      let sum = 0;
+      for (let j = 0; j < 4; j++) {
+        let bk = 0; for (let k = 1; k < NB; k++) if (ws[i * NB + k] > ws[i * NB + bk]) bk = k;
+        si[i * 4 + j] = bk; sw[i * 4 + j] = ws[i * NB + bk]; sum += ws[i * NB + bk]; ws[i * NB + bk] = 0;
+      }
+      for (let j = 0; j < 4; j++) sw[i * 4 + j] /= sum;
     }
     g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
     g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
