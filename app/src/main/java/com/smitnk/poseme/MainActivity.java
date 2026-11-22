@@ -54,11 +54,11 @@ public class MainActivity extends Activity {
                 fileCallback = cb;
                 try {
                     if (p.isCaptureEnabled() && Build.VERSION.SDK_INT >= 29) {
-                        ContentValues v = new ContentValues();
-                        v.put(MediaStore.MediaColumns.DISPLAY_NAME, "poseme_" + System.currentTimeMillis() + ".jpg");
-                        v.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
-                        v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Poseme");
-                        camUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+                        ContentValues cv = new ContentValues();
+                        cv.put(MediaStore.MediaColumns.DISPLAY_NAME, "poseme_" + System.currentTimeMillis() + ".jpg");
+                        cv.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+                        cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Poseme");
+                        camUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
                         startActivityForResult(new Intent(MediaStore.ACTION_IMAGE_CAPTURE).putExtra(MediaStore.EXTRA_OUTPUT, camUri), 2);
                     } else startActivityForResult(p.createIntent(), 1);
                 } catch (Exception e) { fileCallback = null; camUri = null; return false; }
