@@ -25,6 +25,7 @@ import java.io.OutputStream;
 public class MainActivity extends Activity {
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
+    private Uri camUri;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -40,7 +41,10 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
-                return assets.shouldInterceptRequest(r.getUrl());
+                WebResourceResponse resp = assets.shouldInterceptRequest(r.getUrl());
+                if (resp != null && r.getUrl().getPath().endsWith(".wasm")) // loader may guess the wrong mime; streaming WASM compile needs this
+                    resp = new WebResourceResponse("application/wasm", null, resp.getData());
+                return resp;
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
@@ -48,7 +52,16 @@ public class MainActivity extends Activity {
             public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = cb;
-                try { startActivityForResult(p.createIntent(), 1); } catch (Exception e) { fileCallback = null; return false; }
+                try {
+                    if (p.isCaptureEnabled() && Build.VERSION.SDK_INT >= 29) {
+                        ContentValues v = new ContentValues();
+                        v.put(MediaStore.MediaColumns.DISPLAY_NAME, "poseme_" + System.currentTimeMillis() + ".jpg");
+                        v.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+                        v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Poseme");
+                        camUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+                        startActivityForResult(new Intent(MediaStore.ACTION_IMAGE_CAPTURE).putExtra(MediaStore.EXTRA_OUTPUT, camUri), 2);
+                    } else startActivityForResult(p.createIntent(), 1);
+                } catch (Exception e) { fileCallback = null; camUri = null; return false; }
                 return true;
             }
         });
@@ -61,6 +74,10 @@ public class MainActivity extends Activity {
         if (req == 1 && fileCallback != null) {
             fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
             fileCallback = null;
+        } else if (req == 2 && fileCallback != null) {
+            if (res != RESULT_OK && camUri != null) getContentResolver().delete(camUri, null, null);
+            fileCallback.onReceiveValue(res == RESULT_OK && camUri != null ? new Uri[] { camUri } : null);
+            fileCallback = null; camUri = null;
         }
     }
 
