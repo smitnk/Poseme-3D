@@ -9,6 +9,19 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: '8.9' }
-      - run: gradle assembleDebug
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: node --test app/src/test-js/*.test.mjs
+      - name: Download MediaPipe assets
+        run: |
+          W=app/src/main/assets/web
+          mkdir -p $W/lib/mediapipe/wasm $W/models
+          curl -fsSL -o $W/models/pose_landmarker_lite.task https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
+          V=https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14
+          curl -fsSL -o $W/lib/mediapipe/vision_bundle.mjs $V/vision_bundle.mjs
+          curl -fsSL -o $W/lib/mediapipe/wasm/vision_wasm_internal.js $V/wasm/vision_wasm_internal.js
+          curl -fsSL -o $W/lib/mediapipe/wasm/vision_wasm_internal.wasm $V/wasm/vision_wasm_internal.wasm
+      # Maven Central sometimes returns 429 to shared runners; retry with backoff.
+      - run: for i in 1 2 3; do gradle assembleDebug --no-daemon && exit 0; sleep $((i*60)); done; exit 1
       - uses: actions/upload-artifact@v4
         with: { name: Poseme3D-debug-apk, path: app/build/outputs/apk/debug/*.apk }

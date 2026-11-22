@@ -29,6 +29,10 @@ canvas{display:block;touch-action:none}
 #panel .card img{width:100%;aspect-ratio:4/5;object-fit:contain}
 #panel .card span{font-size:12px;line-height:1.2;text-align:center}
 #panel .card .rm{position:absolute;top:2px;right:6px;font-size:14px;opacity:.8}
+#ref{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;z-index:3;display:none;opacity:.35}
+#loa{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
+.hnd{position:fixed;left:0;top:0;width:44px;height:44px;border-radius:50%;border:3px solid #fff;z-index:4;touch-action:none;display:none;opacity:.85}
+#panel .chk{margin:4px 0 8px}
 #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-size:18px;z-index:10;background:#8a8a8a}
 </style>
 <script type="importmap">{"imports":{"three":"./lib/three.module.min.js","three/addons/":"./lib/addons/"}}</script>
@@ -39,6 +43,7 @@ canvas{display:block;touch-action:none}
   <button data-panel="poses" title="Poses">🤸</button>
   <button data-panel="bg" title="Background">🖼️</button>
   <button data-panel="light" title="Light">💡</button>
+  <button data-panel="tools" title="Pose tools">🧘</button>
   <button data-act="shot" title="Screenshot">📷</button>
 </div>
 <div id="top" class="bar">
@@ -67,6 +72,10 @@ canvas{display:block;touch-action:none}
 </div>
 <div id="panel" class="panel"></div>
 <div id="toast"></div>
+<input type="file" id="photo" accept="image/*" hidden>
+<input type="file" id="cam" accept="image/*" capture="environment" hidden>
+<img id="ref" alt="">
+<canvas id="loa"></canvas>
 <input type="file" id="file" accept="image/*,.json,application/json" hidden>
 <script type="module" src="./main.js"></script>
 </body></html>

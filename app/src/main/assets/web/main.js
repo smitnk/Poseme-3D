@@ -8,12 +8,14 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
 import { polygonizeSdf } from './lib/sdf.js';
 import { SDF } from './characters.js';
+import { classifyCurve, smoothCurve, pushRotation, checkPose } from './posetools.js';
+import { detectPose, applyLandmarks } from './photopose.js';
 
 const $ = (s) => document.querySelector(s);
 const D2R = Math.PI / 180;
 
 // ---------- scene ----------
-const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
@@ -1009,7 +1011,7 @@ function mirror(c) {
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 let down = null;
-renderer.domElement.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, axis: tc.axis }; });
+renderer.domElement.addEventListener('pointerdown', (e) => { pushBase = null; down = { x: e.clientX, y: e.clientY, axis: tc.axis }; });
 renderer.domElement.addEventListener('pointerup', (e) => {
   if (!down || down.axis || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 8) return (down = null);
   down = null;
@@ -1165,12 +1167,13 @@ const PANELS = {
       rigEdit.skel.length + ' bones',
     ];
   },
+  tools: () => toolsPanel(),
   color: () => {
     if (sel?.prop) return [swatches('#' + sel.prop.material.color.getHexString(), (col) => sel.prop.material.color.set(col))];
     const c = charOf(); return c ? [swatches(c.color, (col) => { c.color = col; tint(c); })] : [];
   },
 };
-const TITLES = { add: 'Add', poses: 'Poses', bg: 'Background', light: 'Light', camera: 'Camera', squash: 'Squash, stretch & rubber hose', face: 'Expression', hands: 'Hands', color: 'Color', rig: 'Skeleton editor (Rigify-style)' };
+const TITLES = { add: 'Add', poses: 'Poses', bg: 'Background', light: 'Light', camera: 'Camera', squash: 'Squash, stretch & rubber hose', face: 'Expression', hands: 'Hands', color: 'Color', rig: 'Skeleton editor (Rigify-style)', tools: 'Pose tools' };
 function renderPanel(name) {
   openPanel = name;
   P.innerHTML = '';
@@ -1202,17 +1205,161 @@ $('#file').onchange = async (e) => {
     new THREE.TextureLoader().load(url, (t) => { t.colorSpace = THREE.SRGBColorSpace; scene.background = t; });
   }
 };
-function screenshot() {
-  const hidden = [tc.getHelper(), arrows, grid, ...chars.flatMap((c) => c.dots)].filter((o) => o.visible);
-  hidden.forEach((o) => (o.visible = false));
-  (outlines ? effect : renderer).render(scene, camera);
-  const b64 = renderer.domElement.toDataURL('image/png').split(',')[1];
-  hidden.forEach((o) => (o.visible = true));
-  saveFile(b64, 'image/png', `poseme-${Date.now()}.png`);
-}
+const screenshot = () => exportPNG(null);
 
 let toastT;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toastT); toastT = setTimeout(() => (t.style.display = 'none'), 1800); }
+
+// ---------- pose tools: photo pose, line of action, push, check, silhouette / exports ----------
+const need = (c, names) => {
+  if (!c) return toast('Add a character first'), false;
+  const miss = names.filter((n) => !c.joints[n]);
+  if (miss.length) return toast('This model has no ' + miss.join(', ') + ' joint; use a Poseme character or an auto-rigged import'), false;
+  return true;
+};
+const BODY = ['hips', 'spine', 'chest', 'neck', 'head', 'shoulderL', 'elbowL', 'wristL', 'shoulderR', 'elbowR', 'wristR', 'hipL', 'kneeL', 'ankleL', 'hipR', 'kneeR', 'ankleR'];
+const proj = (o) => { const v = wpos(o).project(camera); return [(v.x + 1) / 2 * innerWidth, (1 - v.y) / 2 * innerHeight]; };
+const slider2 = (...a) => { const l = slider(...a); l.querySelector('input').onpointerdown = null; return l; }; // view-only slider: no undo
+let refOpacity = 0.35, checkRes = null, transparent = false, look = null, pushBase = null;
+
+// photo -> pose
+async function onPhoto(e) {
+  const f = e.target.files[0]; if (!f) return;
+  const c = charOf(), img = $('#ref');
+  if (!need(c, BODY)) return;
+  toast('Finding pose…');
+  try {
+    img.src = URL.createObjectURL(f); await img.decode();
+    const lm = await detectPose(img);
+    if (!lm) return toast('No person found in this photo. Try a clearer full-body photo.');
+    pushUndo(); applyLandmarks(c, lm); applyStretch(c);
+    img.style.opacity = refOpacity; img.style.display = 'block';
+    toast('Pose applied');
+  } catch (err) { toast(err.message || String(err)); }
+}
+$('#photo').onchange = $('#cam').onchange = onPhoto;
+
+// line of action
+let loaOn = false;
+const loaCv = $('#loa'), loaCtx = loaCv.getContext('2d'), LOA_COL = { C: '#3c3', straight: '#f90', S: '#e33' };
+const loaHandles = [0, 1, 2].map((i) => {
+  const h = document.createElement('div'); h.className = 'hnd'; document.body.append(h);
+  let lx = 0;
+  h.onpointerdown = (e) => { e.preventDefault(); h.setPointerCapture(e.pointerId); pushUndo(); lx = e.clientX; };
+  h.onpointermove = (e) => { if (h.hasPointerCapture(e.pointerId)) { bendTorso(i, (e.clientX - lx) * 0.01); lx = e.clientX; } };
+  return h;
+});
+function rotWorld(bone, axis, ang) { // like aimBone: rotate bone about a world axis
+  const q = new THREE.Quaternion().setFromAxisAngle(axis, ang);
+  const wq = bone.getWorldQuaternion(new THREE.Quaternion()), pq = bone.parent.getWorldQuaternion(new THREE.Quaternion()).invert();
+  bone.quaternion.copy(pq.multiply(q.multiply(wq))); bone.updateMatrixWorld(true);
+}
+function bendTorso(i, ang) { // positive ang = top moves right on screen
+  const c = charOf(), J = c?.joints; if (!J?.hips) return;
+  const ax = camera.getWorldDirection(new THREE.Vector3());
+  if (i === 2) { rotWorld(J.hips, ax, -ang); for (const n of ['hipL', 'hipR']) J[n] && rotWorld(J[n], ax, ang); } // legs counter-rotate to stay put
+  else for (const [n, w] of i === 0 ? [['neck', 0.4], ['chest', 0.6]] : [['spine', 0.5], ['chest', 0.5]]) J[n] && rotWorld(J[n], ax, ang * w);
+}
+function loaPts(c) {
+  const J = c.joints; if (!['head', 'neck', 'chest', 'spine', 'hips', 'ankleL', 'ankleR'].every((n) => J[n])) return null;
+  const yL = wpos(J.ankleL).y, yR = wpos(J.ankleR).y, a = proj(J.ankleL), b = proj(J.ankleR);
+  const foot = Math.abs(yL - yR) < 0.01 ? [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] : yL < yR ? a : b;
+  return ['head', 'neck', 'chest', 'spine', 'hips'].map((n) => proj(J[n])).concat([foot]);
+}
+function drawLOA() {
+  const dpr = devicePixelRatio || 1;
+  if (loaCv.width !== Math.round(innerWidth * dpr)) { loaCv.width = Math.round(innerWidth * dpr); loaCv.height = Math.round(innerHeight * dpr); }
+  loaCtx.setTransform(dpr, 0, 0, dpr, 0, 0); loaCtx.clearRect(0, 0, innerWidth, innerHeight);
+  const c = loaOn && charOf(), pts = c && loaPts(c);
+  loaHandles.forEach((h) => (h.style.display = pts ? 'block' : 'none'));
+  if (!pts) return;
+  const curve = smoothCurve(pts), col = LOA_COL[classifyCurve(pts).kind];
+  loaCtx.strokeStyle = col; loaCtx.lineWidth = 6; loaCtx.lineCap = loaCtx.lineJoin = 'round'; loaCtx.beginPath();
+  curve.forEach((p, i) => (i ? loaCtx.lineTo(p[0], p[1]) : loaCtx.moveTo(p[0], p[1]))); loaCtx.stroke();
+  [0, 2, 4].forEach((k, i) => { const h = loaHandles[i]; h.style.transform = `translate(${pts[k][0] - 22}px,${pts[k][1] - 22}px)`; h.style.background = col; });
+}
+
+// push the pose
+const pushSnap = (c) => (pushBase = new Map(Object.values(c.joints).map((j) => [j, j.quaternion.toArray()])));
+function pushApply(c, k) {
+  const A = [c.joints.ankleL, c.joints.ankleR].filter(Boolean); c.group.updateMatrixWorld(true);
+  const y0 = A.map((a) => wpos(a).y), low = Math.min(...y0);
+  for (const [j, b] of pushBase) j.quaternion.fromArray(pushRotation((j.userData.rest ?? new THREE.Quaternion()).toArray(), b, k));
+  c.group.updateMatrixWorld(true);
+  const lowest = A.map((a, i) => [a, y0[i]]).filter(([, y]) => y - low < 0.03).sort((p, q) => p[1] - q[1])[0]; // planted foot
+  const h = c.joints.hips;
+  if (lowest && h) {
+    const dy = (lowest[1] - wpos(lowest[0]).y) / (c.group.scale.y || 1);
+    if (h.userData.base) { h.userData.base.y += dy; if (c.autoRig) h.position.copy(h.userData.base); } else h.position.y += dy;
+  }
+  applyStretch(c);
+}
+
+// check pose
+function runCheck() {
+  const c = charOf(); if (!need(c, BODY)) return;
+  const J = c.joints, gq = c.group.getWorldQuaternion(new THREE.Quaternion()).invert();
+  const dir = (a, b) => wpos(J[b]).sub(wpos(J[a])).applyQuaternion(gq).normalize().toArray();
+  const seg = (a, b, e, s) => ({ upper: dir(a + s, b + s), lower: dir(b + s, e + s) });
+  const P2 = (n) => proj(J[n]), arm = (s) => ['shoulder', 'elbow', 'wrist'].map((n) => P2(n + s));
+  checkRes = checkPose({
+    lineKind: classifyCurve(loaPts(c)).kind,
+    armsL: seg('shoulder', 'elbow', 'wrist', 'L'), armsR: seg('shoulder', 'elbow', 'wrist', 'R'),
+    legsL: seg('hip', 'knee', 'ankle', 'L'), legsR: seg('hip', 'knee', 'ankle', 'R'),
+    hipL: P2('hipL'), hipR: P2('hipR'), shL: P2('shoulderL'), shR: P2('shoulderR'),
+    armPts2D: { L: arm('L'), R: arm('R') },
+    torso2D: ['hips', 'spine', 'chest', 'neck', 'shoulderL', 'shoulderR', 'hipL', 'hipR'].map(P2),
+  });
+  renderPanel('tools');
+}
+
+// silhouette / outline looks and PNG export
+function setLook(mode) { // mode: null (restore) | 'sil' | 'outline'
+  if (mode) {
+    const mat = new THREE.MeshBasicMaterial({ color: mode === 'sil' ? 0x000000 : 0xffffff });
+    look = { mode, bg: scene.background, vis: [floor, grid, arrows].map((o) => [o, o.visible]), outlines, mats: [] };
+    chars.forEach((c) => c.group.traverse((o) => {
+      if (!o.isMesh || o.userData.isDot || !o.material || o.material.visible === false || (o.material.transparent && o.material.opacity === 0)) return;
+      look.mats.push([o, o.material]); o.material = mat;
+    }));
+    scene.background = new THREE.Color(0xffffff); look.vis.forEach(([o]) => (o.visible = false)); outlines = mode === 'outline';
+  } else if (look) {
+    look.mats.forEach(([o, m]) => (o.material = m)); scene.background = look.bg; look.vis.forEach(([o, v]) => (o.visible = v)); outlines = look.outlines; look = null;
+  }
+}
+function exportPNG(mode) {
+  const was = look?.mode ?? null;
+  if (was !== mode) { setLook(null); setLook(mode); }
+  const hidden = [tc.getHelper(), arrows, grid, ...chars.flatMap((c) => c.dots)].filter((o) => o.visible);
+  hidden.forEach((o) => (o.visible = false));
+  const bg = scene.background, ca = renderer.getClearAlpha(), fv = floor.visible;
+  if (transparent) { scene.background = null; renderer.setClearAlpha(0); floor.visible = false; }
+  (outlines ? effect : renderer).render(scene, camera);
+  const b64 = renderer.domElement.toDataURL('image/png').split(',')[1];
+  scene.background = bg; renderer.setClearAlpha(ca); floor.visible = fv;
+  hidden.forEach((o) => (o.visible = true));
+  if (was !== mode) { setLook(null); setLook(was); }
+  saveFile(b64, 'image/png', `poseme-${mode || 'pose'}-${Date.now()}.png`);
+}
+
+function toolsPanel() {
+  const c = charOf(), div = (h) => Object.assign(document.createElement('div'), { className: 'chk', innerHTML: h });
+  const push = slider('Push the pose %', 0, 150, 1, 100, (v) => { if (!need(c, BODY)) return; if (!pushBase) pushSnap(c); pushApply(c, v / 100); });
+  push.querySelector('input').onpointerdown = () => { if (need(c, BODY)) { pushUndo(); pushSnap(c); } };
+  return [
+    row(btn('📷 Pose from photo', () => { $('#photo').value = ''; $('#photo').click(); }), btn('📸 Camera', () => { $('#cam').value = ''; $('#cam').click(); }),
+      btn('Hide photo', () => ($('#ref').style.display = 'none'))),
+    slider2('Photo opacity', 0, 1, 0.01, refOpacity, (v) => { refOpacity = v; $('#ref').style.opacity = v; }),
+    row(btn('Line of action', () => { loaOn = !loaOn; if (loaOn) { P.style.display = 'none'; openPanel = null; toast('Drag the 3 circles to bend the body'); } else renderPanel('tools'); }, loaOn)),
+    push,
+    row(btn('Reset to 100%', () => { if (pushBase && c) { pushApply(c, 1); pushBase = null; } renderPanel('tools'); })),
+    row(btn('Check pose', runCheck)),
+    ...(checkRes ? (checkRes.length ? checkRes.map((r) => div(`<b>${r.title}</b>: ${r.tip}`)) : [div('Looks lively! No stiffness found.')]) : []),
+    row(btn('Silhouette', () => { const on = look?.mode === 'sil'; setLook(null); if (!on) setLook('sil'); renderPanel('tools'); }, look?.mode === 'sil')),
+    'Export', row(btn('Save PNG', () => exportPNG(null)), btn('Save silhouette PNG', () => exportPNG('sil')), btn('Save outline PNG', () => exportPNG('outline')),
+      btn('Transparent background', () => { transparent = !transparent; renderPanel('tools'); }, transparent)),
+  ];
+}
 
 // ---------- toolbar wiring ----------
 const ACTS = {
@@ -1245,6 +1392,7 @@ addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; cam
 renderer.setAnimationLoop(() => {
   for (const c of chars) if (c.rig) updateTubes(c);
   (outlines ? effect : renderer).render(scene, camera);
+  drawLOA();
 });
 
 // test hook for automated checks
